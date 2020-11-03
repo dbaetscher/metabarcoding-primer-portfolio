@@ -20,14 +20,23 @@ Analyses are, for the most part, sequential, and numbered in the appropriate ord
 Once the ASV tables have been decontaminated, the taxonomic hits from BLAST must be filtered before the data can be combined and concordance with reference pools assessed.
 
 01-taxonomy-filter-BLAST-hits
+
 02-read-counts-summary 
+
 03-species-occupancy-detection-modeling 
+
 04-filter-ASV-by-SODM 
+
 05-Bray-Curtis-reference-DNA-pools
+
 06-mock-feeds-SODM-Bray-Curtis-filters 
+
 07-full-reference-DNA-pool-primer-evaluation
+
 08-integrate-taxonomic-levels-within-loci
+
 09-vouchered-false-positives
+
 10-mock-feeds-analyses
 
 
