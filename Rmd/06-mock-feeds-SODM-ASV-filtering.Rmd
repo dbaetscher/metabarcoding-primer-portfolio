@@ -1,0 +1,332 @@
+---
+title: "Mock feed data - read in occupany modeling results and filter by Bray-Curtis"
+output: html_notebook
+---
+
+The data decontamination includes two steps:
+1. species occupancy detection modeling
+2. Bray-Curtis dissimilarity analysis
+
+Here, I'll read in the data from the SODM analysis, assess which ASVs will be removed based on that, and then move onto calculating the Bray-Curtis dissimilarities across sample replicates. Finally, the repicates that are more dissimilar (> 0.49) than similar to one another will be removed.
+
+
+## Load data and libraries
+
+```{r load-libraries}
+library(tidyverse)
+library(stringi)
+library(vegan)
+library(reshape2)
+library(textshape)
+library(rlist)
+
+```
+
+As I did with the reference mock communities, the way I'm thinking about this is to create a .txt file with a list of the file names and loci and to read that in, but ideally, I would also have a column for the sample name so that I could actually properly filter for each locus-sample when anti-joining with the dataframe.
+
+Before getting into all of that regex stuff, probably best to take a quick look at whether there are many ASVs that get removed for the data from F1 or the mock feed pools.
+
+```{r load-dataframes}
+# Full dataframe
+features_w_taxonomy <- readRDS("../data/feature_df_no_eDNA_metazoa_only.rds")
+
+# and newly updated, the same dataframes, but using a 98% identity threshold for any species-level assignments
+tax_df_spp_98 <- readRDS("../data/uncollapsed_taxonomy_spp_98.rds")
+unique_tax_spp_98 <- readRDS("../data/unique_taxonomy_spp_98.rds")
+
+
+# meta data for group and type assignments
+meta <- read_csv("../data/jan_sample_list.csv")
+
+# use the new name column to bind to the input file
+feature_tax_name_revised <- features_w_taxonomy %>%
+  left_join(., meta, by = "sample") %>%
+  select(locus, seq, new_name, count) %>%
+  rename(sample = new_name)
+
+
+```
+
+
+## Occupancy modeling data
+
+Based on the SODM filtering, now I need to read those data back in for the mock feed data/mixtures and pools.
+
+The files are located in this directory:
+/Users/dianabaetscher/Documents/git-repos/metabarcoding-methods/Rmd_fixed_db/csv_outputs/SODM
+
+
+```{r create-dataframe-from-csvs}
+# get the names of the files
+fdf <- read.table("~/Documents/git-repos/metabarcoding-methods/data/sodm_samples_loc.txt", stringsAsFactors = FALSE, header = TRUE) %>%
+  tbl_df()
+dir <- "~/Documents/git-repos/metabarcoding-methods/Rmd_fixed_db/csv_outputs/SODM"
+
+# cycle over them, read them and add the locus column on each.
+# at the end, bind them together.
+mock_feed_sodm_df <- lapply(1:nrow(fdf), function(i) {
+  read_csv(paste(dir, fdf$file[i], sep = "/"), col_names = TRUE) %>%
+    mutate(locus = fdf$locus[i]) %>%
+    mutate(sample = fdf$sample[i]) %>%
+    select(locus, sample, everything())
+}) %>%
+  bind_rows() %>%
+  group_by(locus, sample, seq) %>%
+  mutate(max_estimate = sum(estimate,std.error)) %>%
+  mutate(max_estimate = ifelse(max_estimate > 1, 1, max_estimate)) %>% # make 1 the maximum probability.
+  select(locus, seq, estimate, std.error, max_estimate)
+
+```
+
+
+So these are the ASVs that I would be filtering
+```{r filter-asvs-by-sodm}
+mock_feed_sodm_asvs_removed <- mock_feed_sodm_df %>%
+  filter(max_estimate < 0.8)
+
+mock_feed_sodm_asvs_removed
+```
+There aren't very many of these, but some...
+
+so for consistency sake, I suppose better to remove them.
+
+
+Anti-join the ASVs to remove with the full dataframe
+```{r}
+mock_feed_feature_df <- feature_tax_name_revised %>%
+  filter(!str_detect(sample, "VRP") & !str_detect(sample, "FRP") & !str_detect(sample, "extr_blank")) %>%
+  separate(sample, into = c("filler", "perc_fishmeal", "extract", "pcr_rep"), sep = "_", remove = FALSE) %>%
+  unite(feed, filler, perc_fishmeal, sep = "_", remove = TRUE) %>%
+  select(-extract, -pcr_rep) %>%
+  mutate(feed = ifelse(str_detect(feed, "MFP"), "MFP", feed)) %>%
+  mutate(feed = ifelse(str_detect(feed, "MEP"), "MEP", feed))
+
+# check that all of those modifications took effect - basically to make a column that I can use for an anti-join with the SODM filtered data
+mock_feed_feature_df %>%
+  filter(str_detect(sample, "MFP"))
+```
+
+Use an anti-join to remove the 27 ASVs from the full feature table.
+```{r}
+mock_feed_sodm_asvs_removed_dataframe <- mock_feed_feature_df %>%
+  anti_join(., mock_feed_sodm_asvs_removed, by = c("locus", "seq", "feed" = "sample")) %>%
+  select(-feed) # remove the column that I used for the join since I don't need it moving forward
+
+```
+
+Save the output
+```{r save-output-rds}
+saveRDS(mock_feed_sodm_asvs_removed_dataframe, "../data/mockfeed_sodm_asvs_removed_feature_df.rds", compress = "xz")
+
+```
+
+
+
+## Dissimilarity analyses
+
+
+Using the dataframe generated above...
+
+Dissimilarity analyses include a PERMANOVA on Bray-Curtis
+Jaccard similarities (minimizing the effect of PCR amplification bias)
+
+
+The process for looking at the dissimilarity among replicates is to:
+1. read in data that has been cleaned up using the occupancy modeling
+2. create a community matrix (per locus)
+3. standardize data across replicates (fct decostand)
+4. generate Bray-Curtis distances (fct vegdist)
+   4a. Are any replicates more dissimilar than similar? 
+5. generate NMDS plots from distance matrix (fct metaMDS)
+
+
+
+Outcomes:
+Based on the NMDS plots and Bray-Curtis dissimilarity index, I will generate a list of samples to remove.
+
+
+```{r load-functions}
+source("../R/metabarcoding-funcs.R")
+```
+
+
+Cycle over a list of the loci
+```{r locus-list}
+# grab the names of the loci from the full dataframe
+locs <- c("cep", "mifish", "nsCOIFo", "fishminiA")
+
+# how many feed samples?
+mock_feed_sodm_asvs_removed_dataframe %>%
+  select(sample) %>%
+  unique()
+
+```
+
+NOTE: MEP and MFP have a diff number of parts than the mock feeds... 9 replicates vs. 6 replicates,
+so splitting the sample into reference, pool, and pcr replicate will look different.
+
+
+## Bray-Curtis function
+
+Output from the function should go into a directory called
+`csv_outputs/bray_dissimilar/mockfeeds/`
+
+If this directory doesn't exist, the function will create it.
+```{r}
+bray_nmds_mock_feed(mock_feed_sodm_asvs_removed_dataframe, loc = "cep", site = "F1_0")
+
+```
+
+```{r 100%-fishmeal-feed}
+# analyze the four loci for mock feed sample F0_100
+lapply(locs, bray_nmds_mock_feed, sodm_filtered_df = mock_feed_sodm_asvs_removed_dataframe, site = "F0_100")
+```
+
+#### Filler 1
+
+```{r 0%-fishmeal-filler1}
+# lapply the function with all four loci
+lapply(locs, bray_nmds_mock_feed, sodm_filtered_df = mock_feed_sodm_asvs_removed_dataframe, site = "F1_0")
+
+```
+
+```{r 10%-fishmeal-filler1}
+# analyze sample F1_10
+lapply(locs, bray_nmds_mock_feed, sodm_filtered_df = mock_feed_sodm_asvs_removed_dataframe, site = "F1_10")
+
+```
+
+```{r 2%-fishmeal-filler1}
+# analyze sample F1_2
+lapply(locs, bray_nmds_mock_feed, sodm_filtered_df = mock_feed_sodm_asvs_removed_dataframe, site = "F1_2_")
+
+```
+
+
+```{r 25%-fishmeal-filler1}
+# analyze sample F1_25
+lapply(locs, bray_nmds_mock_feed, sodm_filtered_df = mock_feed_sodm_asvs_removed_dataframe, site = "F1_25")
+
+```
+
+
+#### Filler 2
+
+```{r 25%-fishmeal-filler2}
+# analyze sample F2_25
+lapply(locs, bray_nmds_mock_feed, sodm_filtered_df = mock_feed_sodm_asvs_removed_dataframe, site = "F2_25")
+
+```
+
+```{r 0%-fishmeal-filler2}
+# analyze sample F2_0
+lapply(locs, bray_nmds_mock_feed, sodm_filtered_df = mock_feed_sodm_asvs_removed_dataframe, site = "F2_0")
+
+```
+
+
+
+## Mock feed pools
+
+
+```{r mock-equal-pool}
+# analyze the mock equal pool samples
+lapply(locs, bray_nmds_mock_feed, sodm_filtered_df = mock_feed_sodm_asvs_removed_dataframe, site = "MEP")
+
+```
+
+```{r mock-feed-pool}
+# analyze the mock feed pool
+lapply(locs, bray_nmds_mock_feed, sodm_filtered_df = mock_feed_sodm_asvs_removed_dataframe, site = "MFP")
+
+```
+
+Crack open the bray dissimilarity files to take a look at anything > 0.49 dissimilar from the other replicates.
+
+MFP: fishminiA - 36 entries - remove three replicates (see below)
+
+F2_0 fishminiA - 6 entries (F2_0_1_3)
+F1_2 fishminiA - 8 entries (F1_2_2_3)
+F0_100 fishminiA - 18 entries
+F0_100 nsCOIFo - 6 entries (F0_100_1_1)
+F0_100 mifish - 18 entries
+F0_100 cep - 2 entries (F0_100_2_2 and F0_100_1_1)
+F1_0 fishminiA - 16 entries (F0_0_1_1 and F0_0_1_2)
+
+
+I hate the idea of doing this manually, but for the time being, it is nice to have eyes on some of these data before dropping replicates.
+
+Interesting to note that FishminiA has the highest incidence of dissimilarity issues.
+
+
+## Remove dissimilar replicates
+
+```{r load-data}
+# this is the dataframe that have been filtered by occupancy modeling and includes only those ASVs assigned to metazoan taxonomy
+mock_feed_sodm_asvs_removed_dataframe
+
+```
+
+
+A clean, non-redundant version of the reference sample dataframe
+```{r}
+mockfeed_sodm_filtered_unique <- mock_feed_sodm_asvs_removed_dataframe %>% 
+  select(locus, seq, sample, count) %>%
+  unique() %>% # if there are multiple entries with different counts, we want to collapse those reads
+  group_by(locus, seq, sample) %>%
+  mutate(total_reads = sum(count)) %>%
+  select(-count) %>%
+  rename(count = total_reads)
+
+```
+
+So that is the dataframe from which we want to remove this particular list of locus-samples
+```{r}
+# read in the list of samples to remove
+mockfeed_tossers <- read_csv("../data/mock_feed_replicates_to_remove.csv")
+
+```
+
+It turns out that an anti-join is all I need for this filtering step.
+```{r}
+mockfeed_sodm_bray_filtered_unique <- mockfeed_sodm_filtered_unique %>%
+  anti_join(., mockfeed_tossers, by = c("locus", "sample")) 
+
+# remove the negative controls from this df
+mockfeed_decontaminated <- mockfeed_sodm_bray_filtered_unique %>%
+  filter(!str_detect(sample, "NEG") & !str_detect(sample, "M_A")) # remove positive controls too
+```
+
+Save that
+```{r save-decontaminated-df}
+saveRDS(mockfeed_decontaminated, "../data/mockfeed_decontaminated.rds", compress = "xz")
+```
+
+Okay, so that is the dataset that I can work through the assessment analyses with, beginning with summary statistics, then adding in the taxonomy and assessing proportion fishmeal and % reads, etc.
+
+
+
+### Taxonomy for those ASVs retained
+
+```{r load-taxonomic-dfs}
+# un-collapsed and collapsed versions of the taxonomy with a 98% identity threshold for species-level ID
+tax_df_clean_slim <- readRDS("../data/uncollapsed_taxonomy_spp_98.rds")
+clean_taxonomy_df_unique <- readRDS("../data/unique_taxonomy_spp_98.rds")
+
+```
+
+Adding back in the taxonomic information - uncollapsed, so there are multiple taxonomic entries for each locus/seq that need to be summarised.
+
+```{r add-taxonomy}
+# bind the complete (but filtered) taxonomic identities onto the ASV sequence information
+mockfeed_taxonomy <- mockfeed_decontaminated %>%
+  left_join(., tax_df_clean_slim, by = c("locus", "seq"))
+  
+```
+
+Save that
+```{r save-output}
+# save output dataframe that has been filtered by Bray-Curtis as well as the occupancy modeling
+saveRDS(mockfeed_taxonomy, "../data/mockfeed_taxonomy_sodm_bray_clean.rds", compress = "xz")
+
+```

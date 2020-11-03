@@ -1,0 +1,997 @@
+---
+title: "Full reference DNA pool analysis for primer set evaluation"
+output: html_notebook
+---
+
+This notebook begins with the dataframes that have been decontaminated using the site occupancy detection modeling (SODM) and dissimilarity approaches.
+
+First, I will put together the taxonomy and feature tables, summarize the read counts per locus and per sample, and then begin exploring how many of the taxa that were added to the full reference DNA pool were identified and at which taxonomic level.
+
+## Load data
+
+```{r load-libraries-and-data}
+library(tidyverse)
+library(stringi)
+library(readxl)
+library(vegan)
+library(readr)
+library(stringi)
+library(textshape)
+library(reshape2)
+
+
+# un-collapsed and collapsed versions of the taxonomy with a 98% identity threshold for species-level ID
+tax_df_clean_slim <- readRDS("../data/uncollapsed_taxonomy_spp_98.rds")
+clean_taxonomy_df_unique <- readRDS("../data/unique_taxonomy_spp_98.rds")
+
+# load decontaminated feature table
+ref_sodm_bray_filtered_unique <- readRDS("../data/feature_table_sodm_bray_filtered.rds")
+
+```
+
+
+Read in the reference species for the full pool
+```{r reference-spp-list}
+# list of species in the reference mock community 
+reference_spp <- readxl::read_xlsx("../data/full_reference_spp_database_info.xlsx") %>%
+  select(2:4, 6:11)
+
+reference_spp %>%
+  select(species) %>%
+  distinct()
+
+```
+103 species
+88 genera
+60 families
+
+
+
+## Feature table sequences - decontaminated
+
+
+How many feature table sequences do not match up with the taxonomy data frame?
+```{r}
+# reads <- ref_sodm_bray_filtered_unique %>%
+#   group_by(sample) %>%
+#   summarise(sum(count)) %>%
+#   arrange(desc(`sum(count)`)) %>%
+#   ggplot(aes(x = reorder(sample, `sum(count)`), y = `sum(count)`)) +
+#   geom_bar(stat = "identity") +
+#   theme_minimal()
+# 
+# reads + theme(
+#   axis.text.x = element_text(angle = 90, hjust = 0.95)
+# ) +
+#   xlab("sample") +
+#   ylab("total reads")
+
+```
+
+How many reads per locus?
+```{r}
+loc.reads <- ref_sodm_bray_filtered_unique %>%
+  group_by(locus) %>%
+  summarise(sum(count)) %>%
+  arrange(desc(`sum(count)`)) %>%
+  ggplot(aes(x = reorder(locus, `sum(count)`), y = `sum(count)`)) +
+  geom_bar(stat = "identity") +
+  theme_minimal()
+
+loc.reads + theme(
+  axis.text.x = element_text(angle = 90, hjust = 0.95)
+) +
+  xlab("locus") +
+  ylab("total reads")
+
+```
+
+Remove the three loci with the fewest reads:
+```{r}
+loc.reads2 <- ref_sodm_bray_filtered_unique %>%
+  filter(!locus %in% c("teleo", "crust2", "16Sfish", "16Svar", "crust16S", "L2513H2714")) %>%
+  group_by(locus) %>%
+  summarise(sum(count)) %>%
+  arrange(desc(`sum(count)`)) %>%
+  ggplot(aes(x = reorder(locus, `sum(count)`), y = (`sum(count)`)/1000000)) +
+  geom_bar(stat = "identity") +
+  theme_minimal()
+
+loc.reads2 + theme(
+  axis.text.x = element_text(angle = 90, hjust = 0.95)
+) +
+  xlab("locus") +
+  ylab("total reads")
+
+
+```
+
+
+Quantify some of that:
+```{r}
+# ref_sodm_bray_filtered_unique %>%
+#   filter(str_detect(sample, "FRP")) %>%
+#   group_by(locus) %>%
+#   summarise(sum(count)) %>%
+#   mutate(total_reads = sum(`sum(count)`)) %>%
+#   mutate(prop = `sum(count)`/total_reads) %>%
+#   mutate(mean = mean(`sum(count)`)) %>%
+#   mutate(sd = sd(`sum(count)`)) %>%
+#   mutate(median = median(`sum(count)`)) %>%
+#   arrange(`sum(count)`) %>%
+#   mutate(perc = mean*0.001) %>%
+#   mutate(perc2 = mean*0.01)
+#   
+
+```
+
+top performing loci = what % of mean?
+
+
+
+
+
+## Combine taxonomy and sample data frames
+
+
+```{r combine-dfs}
+# using the uncollapsed taxonomny data frame
+features_taxa_df <- ref_sodm_bray_filtered_unique %>%
+  left_join(., tax_df_clean_slim) %>%
+  filter(!is.na(species)) # remove the sequence counts for things that are not matching taxonomy (at this point)
+
+```
+Lots of sequences eliminated at the taxonomy-binding stage... probably a fair number are bacterial since they are found in the extraction blanks, etc.
+
+
+
+## Full reference DNA pool
+
+To assess locus performance, select just the samples from the full-reference pool (FRP)
+```{r full-ref-pool}
+ref_pool_df <- features_taxa_df %>%
+  filter(stri_detect(sample, regex = "FRP")) # select just the full ref pool samples
+  
+```
+
+
+Here I'm operating with the non-collapsed dataframe, which includes multiple top species hits for each sequence. Therefore, when I left-join those data to the reference species dataframe at the species-level, this allows for any of those top-taxonomic hits per sequence to match-up with the reference species.
+
+```{r}
+# count the number of reference species that are not identified to SPECIES by ANY of the loci
+reference_spp %>%
+  left_join(., ref_pool_df, by = c("species", "genus", "family")) %>%
+  filter(is.na(locus)) # how many NAs?
+
+```
+A few things of note:
+We're beginning to suspect there's an ID issue with the sample that was supposed Synbranchus marmoratus.
+The Petrochromis species doesn't have database info, so that could only be identified to genus.
+The Loliolus, Labeobarbus, Sardinella, and Decapterus sp. don't have species info...
+
+So that makes 2 species that we should get to species-level that we're not identifying.
+1. Balistes_capriscus
+2. Priacanthus_arenatus
+
+
+How many reference species that don't have hits at the genus level?
+```{r}
+# count the number of reference species that are not identified to GENUS by ANY of the loci 
+reference_spp %>%
+  left_join(., ref_pool_df, by = c("genus", "family")) %>%
+  filter(is.na(locus)) # how many NAs?
+
+```
+Same two at the genus-level:
+1. Balistes_capriscus
+2. Priacanthus_arenatus
+
+
+How many reference species don't have hits at the family level?
+```{r}
+reference_spp %>%
+  left_join(., ref_pool_df, by = "family") %>%
+  filter(is.na(locus)) # how many NAs?
+           
+```
+
+I'll add a variable that designates the reference species as positive controls so then I can filter based on that.
+```{r}
+FRP <- reference_spp %>%
+  mutate(control = "positive")
+```
+
+
+### Conditional join
+
+Can I join the dataframe in a way that retains the species/genus/family information for whichever taxonomic level is appropriate?
+```{r}
+family_joined_df <- FRP %>%
+  select(species, genus, family, control) %>%
+  full_join(., ref_pool_df, by = "family") %>%
+  unique() 
+
+# using the full-join, now I need to propagate the information for the species and genera that are in common 
+conditional_merged_df <- family_joined_df %>%
+  mutate(species = ifelse(species.x == species.y, species.x, NA)) %>% 
+  mutate(genus = ifelse(genus.x == genus.y, genus.x, NA)) %>% # reorganize the dataframe
+  rename(ref_species = species.x, ref_genus = genus.x) %>%
+  select(ref_species, species, ref_genus, genus, family, control, locus, seq, sample, count, species.y, genus.y, order, class, phylum, domain, taxon_percID, taxonomic_level, taxon)
+  
+# take a look
+conditional_merged_df %>% head()
+
+```
+
+
+Use the conditionally-joined dataframe to count the number of reference species/genera/families identified by all loci.
+```{r species-level-matches}
+all.spp.level <- conditional_merged_df %>%
+  filter(control == "positive") %>% # just the reference species (remove false positives)
+  filter(taxonomic_level == "species") %>% # include hits to just species
+  ungroup() %>%
+  select(species) %>%
+  filter(!is.na(species)) %>%
+  distinct() 
+
+all.spp.level
+
+```
+Max number of species-level matches for all loci = 62
+There are the 41 reference species that were not identified to species.
+
+
+Now, look at genus-level matches and mismatches:
+```{r genus-level-matches}
+all.genus.level <- conditional_merged_df %>%
+  filter(control == "positive") %>%
+  filter(taxonomic_level %in% c("species", "genus")) %>% # include hits to species or genus-level taxonomy
+  ungroup() %>%
+  select(genus) %>%
+  filter(!is.na(genus)) %>%
+  distinct() 
+
+all.genus.level
+```
+Maximum of 83 (of the 88 genera) identified by all loci.
+These are the 5 genera that are not identified to either species or genus
+
+```{r}
+conditional_merged_df %>%
+  filter(control == "positive") %>%
+  filter(taxonomic_level %in% c("species", "genus")) %>% # include hits to species or genus-level taxonomy
+  ungroup() %>%
+  filter(locus %in% c("mifish", "fishminiA", "nsCOIFo", "cep")) %>%
+  select(genus) %>%
+  unique() %>%
+  filter(!is.na(genus))
+
+```
+
+
+
+#### Family-level reference matches
+
+```{r family-level-matches}
+all.family.level <- conditional_merged_df %>%
+  filter(control == "positive") %>%
+  filter(taxonomic_level %in% c("species", "genus", "family")) %>% # include hits to family or better
+  ungroup() %>%
+  select(family) %>%
+  distinct() 
+
+all.family.level
+```
+Are these species identified at higher consensus taxonomic ranks?
+All reference families were identified by a combination of all of the loci.
+
+
+All loci:
+max # species = 62/103
+```{r}
+62/103
+```
+
+max # of genera = 83
+```{r}
+83/88
+```
+
+max # of families = 60 (100% of families)
+
+
+```{r df-for-accum-curve}
+# select only the reference taxa in the merged dataframe 
+all.loci.ref.spp <- conditional_merged_df %>%
+  filter(taxonomic_level %in% c("species", "genus", "family")) %>%
+  filter(control == "positive") # this removes the false positives for the subsequent analyses
+
+```
+
+```{r}
+# calculations for top loci
+all.loci.ref.spp %>%
+  #filter(taxonomic_level %in% c("species", "genus", "family")) %>%
+  #filter(taxonomic_level %in% c("species", "genus")) %>%
+  filter(taxonomic_level == "species") %>%
+  #filter(ref_genus == genus) %>%
+  #filter(locus %in% c("fishminiA", "nsCOIFo")) %>%
+    filter(locus %in% c("fishminiA")) %>%
+  select(species) %>%
+  unique() %>%
+  filter(!is.na(species))
+```
+
+
+
+How many unique species per locus?
+```{r unique-species}
+unique_df <- all.loci.ref.spp %>%
+  filter(taxonomic_level %in% c("species", "genus", "family")) %>%
+  select(ref_species, species, ref_genus, genus, family, locus, taxonomic_level) %>%
+  unique()
+
+tmp1 <- unique_df %>%
+  filter(taxonomic_level == "species") %>%
+  filter(!is.na(species)) %>%
+  select(species, locus) 
+
+uniq_spp <- tmp1 %>%
+  group_by(species) %>%
+  tally(name = "n_loci") %>%
+  filter(n_loci < 2) %>% # these are the 10 species that are identified by a single locus
+  left_join(., tmp1) %>%
+  ungroup() %>%
+  group_by(locus) %>%
+  tally(name = "unique") %>%
+  select(locus, unique) %>%
+  ungroup() %>%
+  mutate(rank = "species")
+
+```
+fishminiA = 3 spp
+mifish = 5 spp
+nsCOIFo = 1 spp
+aquaF2 = 1 spp
+
+```{r species-level-unique-check}
+unique_df %>%
+  filter(locus %in% c("mifish", "fishminiA", "nsCOIFo", "aquaF2", "cep")) %>% # cep doesn't add any add'l species
+  filter(taxonomic_level == "species") %>%
+  filter(ref_species == species) %>%
+  select(species) %>%
+  unique()
+```
+
+```{r unique-genera}
+tmp2 <- unique_df %>%
+  filter(taxonomic_level == "genus") %>% # unique genera per locus
+  filter(ref_genus == genus) %>%
+  select(genus, locus) %>%
+  unique() 
+
+uniq_genus <- tmp2 %>%
+  group_by(genus) %>%
+  tally(name = "n_loci") %>%
+  filter(n_loci == 1) %>%
+  left_join(., tmp2) %>%
+  ungroup() %>%
+  group_by(locus) %>%
+  tally(name = "unique") %>%
+  select(locus, unique) %>%
+  ungroup() %>%
+  mutate(rank = "genus")
+
+```
+
+fishminiA = 4 genera
+nsCOIFo = 3
+16SH1 = 1
+aquaF2 = 1
+
+
+```{r family-level-uniques}
+tmp3 <- unique_df %>%
+  filter(taxonomic_level == "family") %>%
+  select(family, locus) %>%
+  unique() 
+
+uniq_family <- tmp3 %>%
+  group_by(family) %>%
+  tally(name = "n_loci") %>%
+  filter(n_loci == 1) %>%
+  left_join(., tmp3) %>%
+  ungroup() %>%
+  group_by(locus) %>%
+  tally(name = "unique") %>%
+  select(locus, unique) %>%
+  ungroup() %>%
+  mutate(rank = "family")
+
+```
+cep 1
+mifish 2
+short28S 1
+
+Combine the three taxonomic levels of uniques
+```{r combine-uniques}
+uniques <- bind_rows(uniq_spp, uniq_genus, uniq_family)
+
+uniques
+```
+
+
+## Data for Figure 2
+
+
+Calculate the mean values per locus per replicate; alternatively, I could have three lines - one for the minimum, one for the maximum, and one for the mean.
+
+```{r mean-max-min-loc-accum}
+spp.per.sample.loc <- all.loci.ref.spp %>%
+  filter(taxonomic_level == "species") %>%
+    filter(ref_species == species) %>%
+  ungroup() %>%
+  select(species, locus, count, sample) %>% # here, I keep the individual sample replicates intact
+  unique() %>%
+  group_by(species, locus, sample) %>%
+  summarise(total_count = sum(count)) %>%
+  ungroup() %>%
+  group_by(locus, sample) %>%
+  add_tally(name = "num_species") %>%
+  arrange(desc(num_species))
+
+```
+
+
+Maximum species identified per locus
+```{r max-per-loc}
+loc.spp.summary <- spp.per.sample.loc %>%
+  group_by(locus) %>%
+  mutate(max = max(num_species)) %>%
+  mutate(min = min(num_species)) %>%
+  mutate(mean = mean(num_species)) %>%
+  mutate(sd = sd(num_species)) %>%
+  select(locus, min, max, mean, sd, species)
+```
+
+Maximum genera per locus
+```{r genus-cts-by-loc}
+gen.spp.per.sample.loc <- all.loci.ref.spp %>%
+  filter(taxonomic_level %in% c("species", "genus")) %>%
+  filter(ref_genus == genus.y) %>% # this ensures that the genus is accurate to the reference genus, even if the species is not.
+  ungroup() %>%
+  select(ref_species, locus, count, sample) %>%
+  unique() %>%
+  group_by(ref_species, locus, sample) %>%
+  summarise(total_count = sum(count)) %>%
+  ungroup() %>%
+  group_by(locus, sample) %>%
+  add_tally(name = "num_taxa") %>%
+  ungroup() %>%
+  group_by(locus) %>%
+  mutate(max = max(num_taxa)) %>%
+  mutate(min = min(num_taxa)) %>%
+  mutate(mean = mean(num_taxa)) %>%
+  mutate(sd = sd(num_taxa)) %>%
+  select(locus, min, max, mean, sd) %>%
+  unique() %>%
+  mutate(rank = "genus")
+
+```
+
+Species- through family-level per locus
+```{r all-three-tax-levels}
+fam.gen.spp.per.sample.loc <- all.loci.ref.spp %>%
+  filter(taxonomic_level %in% c("species", "genus", "family")) %>% # because the conditionally merged df was joined on family, the family level should be the same as the reference data
+  ungroup() %>%
+  select(ref_species, locus, count, sample) %>%
+  unique() %>%
+  group_by(ref_species, locus, sample) %>%
+  summarise(total_count = sum(count)) %>%
+  ungroup() %>%
+  group_by(locus, sample) %>%
+  add_tally(name = "num_taxa") %>%
+  ungroup() %>%
+  group_by(locus) %>%
+  mutate(max = max(num_taxa)) %>%
+  mutate(min = min(num_taxa)) %>%
+  mutate(mean = mean(num_taxa)) %>%
+  mutate(sd = sd(num_taxa)) %>%
+  select(locus, min, max, mean, sd) %>%
+  unique() %>%
+  mutate(rank = "family")
+
+```
+
+```{r combine-all-three-levels}
+# combine the species- genus- and family-level taxonomic matches to reference species by locus
+overall.loc.summary <- loc.spp.summary %>%
+  select(locus, min, max, mean, sd) %>%
+  unique() %>%
+  mutate(rank = "species") %>%
+  bind_rows(., gen.spp.per.sample.loc) %>%
+  bind_rows(., fam.gen.spp.per.sample.loc) %>%
+  left_join(., uniques)
+
+```
+
+
+```{r plot-all-three-levels}
+# loc.plot2 <- overall.loc.summary %>%
+#   ggplot(aes(x = reorder(locus, -mean), y = mean, color = rank, shape = rank)) +
+#    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+#       geom_point(alpha = 0.8) +
+#     theme_bw() +
+#   ylab("Reference species") +
+#   xlab("Locus") +
+#   #scale_color_manual(values = c("midnightblue", "royalblue1", "lightskyblue")) +
+#   scale_color_manual(values = c("black", "gray42", "gray62")) +
+#   scale_y_continuous(limits = c(0, 103)) 
+#   
+# loc.plot2 + theme(
+#   axis.text.x = element_text(angle = 90, hjust = 0.95),
+#                              legend.position = c(0.8, 0.8)
+# )
+
+```
+
+
+
+
+
+## Aquateam feedback - 27 May 2020
+
+
+
+A couple of useful comments from the group:
+1. Add a plot that includes the info of Figure 1 (locus accumulation curve), but using the proportion of species/genera/families identified by each locus in a cumulative fashion.
+
+Pete's point was that we can only get 62 species-level identities from all 22 of these loci and it's important to use 62 as the 100% threshold rather than 103, since the 62/103 is due to the identity of the reference samples (coupled with the loci).
+
+
+I should be able to derive that info from my existing species accumulation curves
+
+
+## Rank accumulation curves
+
+We can visually capture the combinatorial power of the loci using rank accumulation curves where the locus that resolves the most species in our mock community is first and each additional locus is ordered and added to contribute to the overall number of known taxa.
+
+
+Create one curve, ordered by the number of species that a given locus resolves.
+This can be done in the package "vegan" by ordering the loci and then setting method = "collector."
+
+Rather than defaulting to ordering the loci by total number of species recovered, I manually adjusted the "collector" locus order because the rank according to # of species doesn't take complementarity into account.
+
+```{r}
+loc.spp.ordered <- all.loci.ref.spp %>%
+  filter(taxonomic_level == "species") %>% # just at the species-level
+  ungroup() %>%
+  filter(ref_species == species) %>% # only those entries with accurate ID to the reference species
+  group_by(species, locus) %>%
+  summarise(total_count = sum(count)) %>%
+  ungroup() %>%
+  group_by(locus) %>%
+  add_tally(name = "num_species") %>%
+  arrange(desc(num_species)) %>%
+  ungroup()
+  
+loc.spp.ordered$locus <- factor(loc.spp.ordered$locus, levels = c("fishminiA", "nsCOIFo", "mifish", "aquaF2", "cep", "plankCOI", "16SH1", "aquaF3", "shark474", "fishcoilbc",  "sharkCOImini", "16Svar", "16Sfish", "minibar",  "crust16S", "18Sn4", "18SSSU3", "ceph16S", "L2513H2714", "short28S", "teleo", "crust2"))
+
+# use sum as the aggregation function to keep the read count values
+wide_ordered.loc.samples <- dcast(loc.spp.ordered, locus ~ species, value.var = "num_species", fun.aggregate = sum)
+
+# change the sample column into rownames
+wide_ordered.loc.samples_tbl <- column_to_rownames(wide_ordered.loc.samples, loc = 1)
+sp1 <- specaccum(wide_ordered.loc.samples_tbl, method = "collector", permutations = 1000)
+
+# test out a species version first
+# convert to a df and calculate the proportion
+species_loc_prop_df <- as.data.frame(sp1$richness) %>%
+  rownames_to_column(var = "locus") %>%
+  mutate(proportion = sp1$richness/max(sp1$richness)) %>% 
+  mutate(taxon_level = "species")
+
+```
+
+### genus and species accumulation...
+
+
+```{r}
+genus.ordered.all.loc <- all.loci.ref.spp %>%
+  filter(taxonomic_level %in% c("species", "genus")) %>% # consensus taxonomy = either spp or genus
+  ungroup() %>%
+  filter(ref_species == species | ref_genus == genus) %>% # either a match to the correct species or genus
+  select(ref_species, locus, count) %>% # make sure there are no duplicates that will cause double-counting.
+  unique() %>%
+  group_by(locus, ref_species) %>%
+  summarise(total_count = sum(count)) %>% # sum the read counts for the same species in the same sample/locus
+  ungroup() %>%
+  group_by(locus) %>% # tally the number of species identified by each locus (in each replicate)
+  add_tally(name = "num_taxa") %>%
+  arrange(desc(num_taxa)) %>%
+  ungroup() %>%
+  select(locus, ref_species, num_taxa)
+
+# explicitly set the factor levels
+genus.ordered.all.loc$locus <- factor(genus.ordered.all.loc$locus, levels = c("fishminiA", "nsCOIFo", "mifish", "cep", "aquaF2", "aquaF3", "16SH1", "shark474", "fishcoilbc", "plankCOI", "sharkCOImini", "16Svar", "16Sfish", "minibar", "crust16S", "18Sn4", "18SSSU3", "ceph16S", "L2513H2714", "short28S", "teleo", "crust2"))
+
+# reformat
+wide_ordered.genus.spp <- dcast(genus.ordered.all.loc, locus ~ ref_species, value.var = "num_taxa", fun.aggregate = sum)
+
+# change the sample column into rownames 
+wide_ordered.gen.spp.tbl <- column_to_rownames(wide_ordered.genus.spp, loc = 1)
+accurve.ordered.genus.spp <-specaccum(wide_ordered.gen.spp.tbl, method="collector", permutations = 1000)
+
+# calculate proportions
+genus_loc_prop <- as.data.frame(accurve.ordered.genus.spp$richness) %>%
+  rownames_to_column(var = "locus") %>%
+  mutate(proportion = accurve.ordered.genus.spp$richness/max(accurve.ordered.genus.spp$richness)) %>% 
+  mutate(taxon_level = "genus")
+
+```
+
+
+
+```{r}
+fam.ordered.all.loc <- all.loci.ref.spp %>%
+  filter(taxonomic_level %in% c("species", "genus", "family")) %>% # the df is merged on family, so in all cases, the family-level taxonomy should be correct
+  ungroup() %>%
+  select(ref_species, locus, count) %>% # make sure there are no duplicates that will cause double-counting.
+  unique() %>%
+  group_by(locus, ref_species) %>%
+  summarise(total_count = sum(count)) %>% # sum the read counts for the same species in the same locus
+  ungroup() %>%
+  group_by(locus) %>% # tally the number of species identified by each locus
+  add_tally(name = "num_taxa") %>%
+  arrange(desc(num_taxa)) %>%
+  ungroup() %>%
+  select(locus, ref_species, num_taxa)
+  
+# explicitly set the factor levels
+fam.ordered.all.loc$locus <- factor(fam.ordered.all.loc$locus, levels = c("fishminiA", "nsCOIFo", "mifish", "cep", "aquaF2", "aquaF3", "16SH1", "shark474", "fishcoilbc", "plankCOI", "sharkCOImini", "16Svar", "16Sfish", "minibar", "crust16S", "18Sn4", "18SSSU3", "ceph16S", "L2513H2714", "short28S", "teleo", "crust2"))
+
+
+# reformat
+wide_ordered.fam <- dcast(fam.ordered.all.loc, locus ~ ref_species, value.var = "num_taxa", fun.aggregate = sum)
+
+# change the sample column into rownames 
+wide_ordered.fam.tbl <- column_to_rownames(wide_ordered.fam, loc = 1)
+accurve.ordered.fam <-specaccum(wide_ordered.fam.tbl, method="collector", permutations = 1000)
+
+# generate proportions
+family_loc_prop <- as.data.frame(accurve.ordered.fam$richness) %>%
+  rownames_to_column(var = "locus") %>%
+  mutate(proportion = accurve.ordered.fam$richness/max(accurve.ordered.fam$richness)) %>% 
+  mutate(taxon_level = "family")
+
+```
+
+
+
+```{r}
+# combine those
+loc_accum_prop_combo <- bind_rows(species_loc_prop_df, genus_loc_prop, family_loc_prop) %>%
+  #select(locus, proportion, taxon_level) %>%
+  ungroup() %>%
+  group_by(taxon_level) %>%
+  rename(richness = `sp1$richness`) %>%
+  mutate(richness = ifelse(taxon_level == "genus", `accurve.ordered.genus.spp$richness`, richness)) %>%
+    mutate(richness = ifelse(taxon_level == "family", `accurve.ordered.fam$richness`, richness)) %>%
+  select(locus, richness, proportion, taxon_level)
+
+# factor levels
+loc_accum_prop_combo$locus <- factor(loc_accum_prop_combo$locus)
+
+loc_accum_prop_combo %>%
+  arrange(proportion)
+```
+
+```{r plot-formatting}
+# use expand to fill in the species-level for L2513H2714
+loc_accum_prop_combo <- loc_accum_prop_combo %>%
+  expand(taxon_level, locus) %>%
+  left_join(., loc_accum_prop_combo) %>%
+  mutate(richness = ifelse(is.na(richness), 62, richness)) %>%
+    mutate(proportion = ifelse(is.na(proportion), 1, proportion))
+
+# factor levels
+loc_accum_prop_combo$tax2 <- factor(loc_accum_prop_combo$taxon_level, levels = c("species", "genus", "family"))
+
+```
+
+
+```{r plot-accumulation-curve-taxa}
+# set colors
+my_pal <- c("steelblue", "darkcyan", "darkseagreen3")
+
+# plot the accumulation curve
+loc_accum_plot <- ggplot(loc_accum_prop_combo) +
+  geom_point(aes(x = reorder(locus, richness), y = richness, color = tax2)) +
+  geom_line(data = loc_accum_prop_combo, aes(x = reorder(locus, richness), y = richness, color = tax2, group = tax2, linetype = tax2)) +
+  theme_bw() +
+  expand_limits(y = 0) +
+  xlab("Locus") + 
+  ylab("Reference species") +
+  labs(color = "Taxonomic rank") +
+    labs(linetype = "Taxonomic rank") +
+  scale_color_manual(values = my_pal)
+
+loc_accum_plot +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.95),
+    #axis.text.x = element_blank(),
+    axis.title.x = element_text(margin = margin(t = 10), size = 11),
+    axis.title.y = element_text(margin = margin(r = 10), size = 11),
+    legend.text = element_text(size = 10),
+    #legend.title = element_text(size = 12),
+    legend.position=c(.25,0.25),
+    legend.title = element_blank()
+  )
+
+```
+
+
+```{r create-dual-panel-plot}
+# two panels for the accumulation plot
+dual_panel_df <- loc_accum_prop_combo %>%
+  pivot_longer(cols = 3:4, names_to = "y_axis", values_to = "value") %>%
+  mutate(y_axis = ifelse(y_axis == "proportion", "prop. of identified taxa", "species richness")) %>%
+  mutate(gene = ifelse(locus %in% c("fishminiA", "nsCOIFo", "shark474", "aquaF3", "aquaF2", "plankCOI", "fishcoilbc", "sharkCOImini", "minibar", "crust2"), "COI", "16S")) %>%
+  mutate(gene = ifelse(locus %in% c("mifish", "teleo"), "12S", gene)) %>%
+    mutate(gene = ifelse(str_detect(locus, "18S"), "18S", gene)) %>%
+        mutate(gene = ifelse(str_detect(locus, "28S"), "28S", gene)) %>%
+  mutate(gene = paste0("(",gene,")")) %>%
+  unite(loc.gene, locus, gene, sep = " ", remove = F)
+
+ testplot2 <- dual_panel_df %>%
+   ggplot() +
+  geom_point(aes(x = reorder(loc.gene, value), y = value, color = tax2)) +
+  geom_line(aes(x = reorder(loc.gene, value), y = value, color = tax2, group = tax2, linetype = tax2)) +
+  theme_bw() +
+  expand_limits(y = 0) +
+  xlab("Locus") + 
+  ylab("Reference taxa (103 species)") +
+  labs(color = "Taxonomic rank") +
+    labs(linetype = "Taxonomic rank") +
+  scale_color_manual(values = my_pal)
+
+testplot2 + facet_grid(rows = vars(y_axis), scales = "free_y") +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.95),
+    axis.title.x = element_text(margin = margin(t = 10), size = 11),
+    axis.title.y = element_text(margin = margin(r = 10), size = 11),
+    legend.text = element_text(size = 10),
+    #legend.title = element_text(size = 12),
+    legend.position=c(.85,0.8),
+    legend.title = element_blank()
+  )
+  
+ggsave("pdf_outputs/taxa_accumulation_curves_combined_prop.pdf", width = 7, height = 5)
+```
+
+```{r keep-loc-order-consistent}
+# This will be the canonical order of the loci for this set of figures
+loc.list <- dual_panel_df %>%
+  filter(y_axis == "species richness" & tax2 == "genus") %>%
+  arrange(value) %>%
+  ungroup() %>%
+  select(loc.gene) %>%
+  as.list()
+
+loc.list$loc.gene
+loc_levels <- loc.list$loc.gene
+dual_panel_df$loc.gene <- factor(dual_panel_df$loc.gene, levels = loc_levels)
+levels(dual_panel_df$loc.gene)
+
+loc_info <- dual_panel_df %>%
+  ungroup() %>%
+  select(locus, loc.gene)
+```
+
+
+
+
+
+
+
+Redo the dual-panel plot with the appropriate color scheme
+
+```{r locus-tidying-for-plotting}
+loc.summary <- overall.loc.summary %>%
+  left_join(loc_info) %>%
+  unique()
+  
+
+loc.summary$rank <- factor(loc.summary$rank, levels = c("species", "genus", "family"))
+loc.summary$loc.gene <- factor(loc.summary$loc.gene, levels = loc_levels)
+```
+
+
+
+
+```{r}
+# plot the number of species/genera/families identified by each locus
+# and the number unique 
+loc.summary.type <- loc.summary %>%
+  mutate(type = "overall") %>%
+  pivot_longer(cols = 7,9, names_to = "category", values_to = "tally") %>%
+  mutate(category = ifelse(is.na(tally), "overall", category)) %>%
+  arrange(rank == "species", desc(mean))
+
+# plot it up
+loc.plot3 <- ggplot(loc.summary.type, aes(x = reorder(loc.gene, -mean))) + 
+  #facet_grid(rows = vars(category), scales = "free_y") + 
+      geom_point(data = subset(loc.summary.type, type == "overall"), aes(x = reorder(loc.gene, -mean), y = mean, color = rank)) +
+      geom_errorbar(data = subset(loc.summary.type, type == "overall"), aes(ymin=mean-sd, ymax=mean+sd, color = rank), width=.1) +
+  geom_bar(data = subset(loc.summary.type, category == "unique"), aes(y = tally, fill = rank), stat = "identity", alpha = 0.8) +
+    theme_bw() +
+  ylab("Reference taxa") +
+  xlab("Locus") +
+  #labs(fill = "Taxonomic rank") +
+  scale_color_manual(values = my_pal) +
+  scale_fill_manual(values = my_pal)
+  
+# formatting
+loc.plot3 + 
+  theme(
+  axis.text.x = element_text(angle = 90, hjust = 0.95),
+                             legend.position = c(0.87, 0.8),
+  axis.title.y = element_text(margin = margin(r = 10)),
+  axis.title.x = element_text(margin = margin(t = 10)),
+  legend.title = element_blank()
+)
+
+#ggsave("pdf_outputs/ref_spp_FRP_w_unique_taxa_per_locus_06192020.pdf", width = 7, height = 5)
+```
+
+
+
+
+
+## NOT SURE IF I WANT TO KEEP THIS IN HERE.
+## Locus length and taxonomic resolution
+
+
+Does locus-length relate to taxonomic resolution?
+
+```{r}
+# read in the product length data
+# loc_lengths <- read_csv("../data/loc_lengths.csv") %>%
+#   filter(!is.na(locus))
+# 
+# ll_plot <- loc_lengths %>%
+#   ggplot(aes(x = reorder(locus, product), y = product)) +
+#   geom_point() +
+#   theme_minimal() +
+#   ylab("Product size (bp)") +
+#   xlab("Locus")
+# 
+# ll_plot + theme(
+#   axis.text.x = element_text(angle = 90),
+#   axis.title.y = element_text(margin = margin(r = 10))
+# )
+# 
+# ggsave("pdf_outputs/locus_length.pdf", height = 4, width = 7)
+#   
+# # gene identities
+# genes <- read_csv("../data/loc_genes.csv")
+
+```
+
+
+```{r add-loc-length-taxonomy}
+# set colors
+# cbp1 <- c("#E69F00", "#56B4E9", "#009E73","#660066",
+#            "#0072B2", "#D55E00", "#CC79A7")
+# 
+# orpink <- c("#FF9900", "#339999", "#330099", "#0066CC", "#990066")
+# 
+# length_plot_ranks <- loc_lengths %>%
+#   mutate(locus = ifelse(locus == "Shark474", "shark474", locus)) %>%
+#   mutate(locus = ifelse(locus == "Short28S", "short28S", locus)) %>%
+#     left_join(., genes) %>%
+#   left_join(., loc.summary) %>%
+#     filter(rank == "species") %>%
+#   unique() %>%
+#   ggplot(aes(x = product, y = mean, color = gene)) +
+#    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.1) +
+#     geom_point(alpha = 0.8) +
+#     theme_bw() +
+#   ylab("Reference species") +
+#   xlab("Locus length (bp)") +
+#   labs(color = "Barcoding gene") +
+#   scale_color_manual(values = orpink)
+#   
+#   
+# length_plot_ranks + theme(
+#   axis.text.x = element_text(angle = 90, hjust = 0.95),
+#   axis.title.x = element_text(margin = margin(t = 10)),
+#     axis.title.y = element_text(margin = margin(r = 10)),
+#   #legend.title = element_blank(),
+#                              #legend.position = c(0.9, 0.85)
+# )
+
+#ggsave("pdf_outputs/locus_length_by_reference_spp_all_ranks.pdf", width = 7, height = 3.5)
+
+```
+
+# Additional ways to evaluate the primer sets
+
+## Reference database
+
+Summarize the number of reference species per gene region for Supporting Information.
+
+
+```{r reference-database-completeness}
+gene_db_plot <- reference_spp %>%
+  pivot_longer(cols = 5:9, names_to = "gene", values_to = "blast_entries") %>%
+  mutate(db_presence = ifelse(blast_entries > 0, 1, 0)) %>%
+  select(species, gene, blast_entries, db_presence) %>%
+  unique() %>%
+  filter(db_presence > 0) %>%
+  mutate(gene = ifelse(gene == "16", "16S", gene)) %>%
+  mutate(gene = ifelse(gene == "12s", "12S", gene)) %>%
+  mutate(gene = ifelse(gene == "18s", "18S", gene)) %>%
+  mutate(gene = ifelse(gene == "28s", "28S", gene)) %>%
+  group_by(gene) %>%
+  add_tally(name = "n_ref_spp") %>% 
+  ungroup() %>%
+  group_by(species) %>%
+  add_tally(name = "n_genes") %>%
+  ggplot(aes(x = reorder(species, -n_genes), y = gene)) +
+  geom_tile(aes(fill = gene)) +
+  theme_bw() +
+  coord_flip() +
+  xlab("Reference taxa") +
+  ylab("Barcoding gene") +
+  scale_fill_manual(values = orpink)
+
+gene_db_plot + theme(
+  legend.position = "none",
+  axis.text.x = element_text(size = 8),
+  axis.title.x = element_text(margin = margin(t = 10))
+)
+
+#ggsave("pdf_outputs/gene_database_summary_v2.pdf", height = 12, width = 6)
+```
+
+```{r summarize-reference-data}
+reference_spp %>%
+  pivot_longer(cols = 5:9, names_to = "gene", values_to = "blast_entries") %>%
+  mutate(db_presence = ifelse(blast_entries > 0, 1, 0)) %>%
+  select(species, gene, db_presence) %>%    
+  unique() %>%
+  pivot_wider(names_from = "gene", values_from = db_presence)
+
+```
+
+
+
+
+## Read depth vs. number of reference taxa identified
+
+Does increased read depth correspond to increased taxonomic resolution or additional taxa identified?
+```{r}
+reads_taxa <- features_taxa_df %>%
+  select(locus, seq, sample, count, taxon) %>%
+  unique() %>%
+  group_by(locus) %>%
+  summarise(reads_per_loc = sum(count)) %>%
+  left_join(., loc.summary) %>%
+  #filter(rank == "species") %>%
+  ggplot(aes(reads_per_loc, mean, color = rank)) +
+  geom_point() +
+  theme_minimal() +
+  xlab("Reads per locus") +
+  ylab("Reference taxa (mean per locus)") +
+  scale_color_manual(values = my_pal)
+
+reads_taxa +
+  theme(
+    #axis.text.x = element_text(angle = 90),
+    axis.title.x = element_text(margin = margin(t = 10)),
+        axis.title.y = element_text(margin = margin(r = 10)))
+
+#ggsave("pdf_outputs/reads_per_locus_by_reference_taxa.pdf", width = 6, height = 4)
+```
+

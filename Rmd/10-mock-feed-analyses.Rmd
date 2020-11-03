@@ -1,0 +1,532 @@
+---
+title: "Mock feed analyses"
+output: html_notebook
+---
+
+Using output from `06-mock-feeds-SODM-Bray-Curtis-filters.Rmd` we'll go ahead and analyze those data and their associated taxonomy.
+
+
+Analysis of experimental feeds with decontaminated data. Because the focus is on the relationships between tissue input and proportion of sequencing reads, we are not using the stringently filtered taxonomic dataframe in order to leverage our knowledge of the reference species that we know were added to the mixtures - even if the taxonomic hits were ambiguously to genus or family.
+
+
+## Load data
+
+```{r data-and-libraries}
+library(tidyverse)
+library(scales)
+library(stringi)
+library("GGally")
+library(pals)
+
+# clean df
+mockfeed_decontaminated <- readRDS("../data/mockfeed_decontaminated.rds")
+
+# taxonomy
+tax_df_clean_slim <- read_rds("../data/uncollapsed_taxonomy_spp_98.rds")
+clean_taxonomy_df_unique <- read_rds("../data/unique_taxonomy_spp_98.rds")
+
+
+# read in the species and proportions
+mock_spp <- read_csv("../data/mock_spp_pool.csv") %>%
+  mutate(species = ifelse(species == "Synbranchus_marmoratus", "Ophisternon_aenigmaticum", species)) %>%
+  mutate(genus = ifelse(genus == "Synbranchus", "Ophisternon", genus)) # revising this bec we don't have confidence in the marmoratus ID for the sample
+
+# meta data for group and type assignments
+meta <- read_csv("../data/jan_sample_list.csv")
+# the amount in ng/ul of DNA added to the mock DNA pools with the feed species
+mock_pool_inputs <- read_csv("../data/mock_feed_spp_prop.csv") %>%
+  mutate(species = ifelse(species == "Synbranchus_marmoratus", "Ophisternon_aenigmaticum", species)) # revising this bec we don't have confidence in the marmoratus ID
+
+```
+
+
+## Identify mock feed reference taxa from the uncollapsed taxonomy
+
+Using the loc-integrated data already masks some of these potential species-level ids; join on reference species with the uncollapsed dataframe.
+
+```{r}
+mockfeed_decon_uncollapsed_tax <- mockfeed_decontaminated %>% # use the decontaminated dataframe
+  filter(locus %in% c("mifish", "fishminiA", "nsCOIFo", "cep")) %>% # include just the four loci that were decontaminated
+  left_join(., tax_df_clean_slim) # join with the uncollapsed taxonomy
+
+```
+
+How many reads per locus (total) to assess how many reads the proportionate distribution of reads across fish taxa would give to the lowest tissue input players:
+
+```{r proportionate-read-calcs}
+mockfeed_decontaminated %>%
+  group_by(locus, sample) %>%
+  summarise(sum(count)) %>%
+  filter(locus %in% c("mifish", "fishminiA", "nsCOIFo", "cep")) %>% # include just the four loci that were decontaminated
+  filter(!str_detect(sample, "0")) %>% # ignore the 0% fishmeal
+  filter(!str_detect(sample, "M")) %>% # excluding the mock pools
+  mutate(lowest_input = `sum(count)`*0.0001) %>%
+  arrange(lowest_input)
+
+```
+Based on this calculation, if the number of reads that were attributed to the lowest input taxa were proportionate to the amount of tissue of that taxa, the 0.01% taxa would have < 2 reads in all but two replicates of the mock equal pool and mock feed pool, while the lowest read depth for the tissue mixtures at the 0.01% level would be 7.4 reads for F1_25_2_3 and nsCOIFo, and there would be > 10 reads per replicate for all other loci.
+
+
+Using the mock feed species as a reference point for joining/identifying the "correct" taxa in the sequencing data. 
+```{r}
+# This dataframe includes read counts at the family-level, which could be duplicative for the 10 taxa that share families
+mockfeeds_ref_taxa_family_joined <- mock_spp %>%
+  mutate(control ="positive") %>%
+  full_join(., mockfeed_decon_uncollapsed_tax, by = "family") %>%
+  mutate(match = "family") %>%
+  mutate(match = ifelse(genus.x == genus.y, "genus", match)) %>%
+  mutate(match = ifelse(species.x == species.y, "species", match)) %>%
+  mutate(match = ifelse(is.na(taxonomic_level), "false -", match)) %>%
+  # summarise the taxonomic info for each sample/locus
+  # deal with the duplicate families
+  mutate(remove = ifelse(species.x == "Labeobarbus_sp." & genus.x == "Semotilus", "yes", "no")) %>%
+    mutate(remove = ifelse(species.x == "Petrochromis_kazumbe" & genus.x == "Oreochromis", "yes", "no")) %>%
+      mutate(remove = ifelse(species.x == "Salmo_salar" & genus.x == "Salvelinus", "yes", "no")) %>%
+        mutate(remove = ifelse(species.x == "Scomber_scombrus" & genus.x == "Thunnus", "yes", "no")) %>%
+          mutate(remove = ifelse(species.x == "Limnothrissa_miodon" & genus.x == "Sardinella", "yes", "no")) %>%
+  ungroup() %>%
+  mutate(tax.rank = ifelse(match == "species", 1, 2)) %>% # create numeric ranks for taxonomic ranks to... rank them
+           mutate(tax.rank = ifelse(match == "genus", 2, tax.rank)) %>%
+           mutate(tax.rank = ifelse(match == "family", 3, tax.rank)) %>%
+          filter(!is.na(match)) %>%
+            group_by(locus, sample, species.x) %>% # take the best taxonomic hit per species
+            mutate(best.rank = min(tax.rank)) %>%
+            filter(tax.rank == best.rank) %>% # this dataframe still includes duplicates for all of the entries above species.
+            select(locus, seq, sample, species.x, genus.x, family, count, match, tax.rank, best.rank) %>%
+            unique() %>% # remove duplicates
+            ungroup() %>% 
+            group_by(locus, sample, species.x, genus.x, family, match) %>% # where there are multiple taxonomic entries for the same species, in a given locus/sample, collapse those 
+           summarise(sum_reads = sum(count)) %>% # now I can summarise reads within a species
+            ungroup() 
+
+```
+
+Do something similar as above, but only include up to the genus-level to avoid potenital double-counting issues
+```{r}
+mock_spp %>%
+  mutate(control ="positive") %>%
+  full_join(., mockfeed_decon_uncollapsed_tax, by = c("genus", "family")) %>%
+  mutate(match = "genus") %>%
+  mutate(match = ifelse(species.x == species.y, "species", match)) %>%
+  mutate(match = ifelse(is.na(taxonomic_level), "false -", match)) %>%
+  filter(match == "false -") #  false negatives at the genus level with uncollapsed taxonomy.
+```
+**Because Synbranchus is the only non-genus-level match, maybe I could just include that single taxon at the family-level?
+
+```{r}
+mockfeed_decon_uncollapsed_tax %>%
+  filter(family == "Synbranchidae")
+```
+
+```{r}
+mockfeeds_ref_taxa_genus_joined <- mock_spp %>%
+  mutate(genus = ifelse(genus == "Synbranchus", "Ophisternon", genus)) %>% # modify this reference taxa identity bec it is questionable.
+  mutate(control ="positive") %>%
+  full_join(., mockfeed_decon_uncollapsed_tax, by = c("genus", "family")) %>%
+  mutate(match = "genus") %>%
+  mutate(match = ifelse(species.x == species.y, "species", match)) %>%
+  mutate(match = ifelse(is.na(taxonomic_level), "false -", match)) %>%
+  ungroup() %>%
+  mutate(tax.rank = ifelse(match == "species", 1, 2)) %>% # create numeric ranks for taxonomic ranks to... rank them
+          filter(!is.na(match)) %>%
+            group_by(locus, sample, species.x) %>% # take the best taxonomic hit per species
+            mutate(best.rank = min(tax.rank)) %>%
+            filter(tax.rank == best.rank) %>% # this dataframe still includes duplicates for all of the entries above species.
+            select(locus, seq, sample, species.x, genus, family, count, match, tax.rank, best.rank) %>%
+            unique() %>% # remove duplicates
+            ungroup() %>% 
+            group_by(locus, sample, species.x, genus, family, match) %>% # where there are multiple taxonomic entries for the same species, in a given locus/sample, collapse those 
+           summarise(sum_reads = sum(count)) %>% # now I can summarise reads within a species
+            ungroup() 
+
+```
+
+Okay, so my two datasets are:
+`mockfeeds_ref_taxa_family_joined` and `mockfeeds_ref_taxa_genus_joined`
+
+I still need to summarise across replicates, but that can happen in another step.
+
+## Add metadata
+
+Take a look with the genus-level for now because it avoids the issues of the duplicate reads
+```{r mock-equal-pool-v1}
+# combine the meta data with the feature table sequencing data
+mock_genus_df <- mockfeeds_ref_taxa_genus_joined %>%
+  left_join(meta, by = c("sample" = "new_name")) %>%
+  rename(species = species.x)
+
+MEP_rep_integr <- mock_genus_df %>%
+  filter(stri_detect(sample, regex = "MEP")) %>%
+  ungroup() %>%
+    unique() %>% # and another set of locus-integration??
+  group_by(locus, species) %>%
+  mutate(tax.rank = ifelse(match == "species", 1, 2)) %>%
+    mutate(tax.rank = ifelse(match == "genus", 2, tax.rank)) %>%
+    mutate(best.rank = min(tax.rank)) %>% # I want the highest ranked taxonomic rank for each locus, species, sample combo
+  mutate(total_reads = sum(sum_reads)) %>%
+  filter(tax.rank == best.rank) %>%
+  ungroup() %>%
+  group_by(locus) %>%
+  mutate(prop_reads = total_reads/(sum(total_reads))) # calculate the proportion of reads for each taxon/locus
+
+
+MEP_rep_integr$match <- factor(MEP_rep_integr$match, levels = c("species", "genus"))
+MEP_rep_integr$loc <- factor(MEP_rep_integr$locus, levels = c("fishminiA", "nsCOIFo", "cep", "mifish"))
+
+```
+**Reorder the species to be in a consistent order based on the amount of tissue added for the various feeds.
+
+```{r mock-pool-replicates-merged}
+MP_rep_integr <- mock_genus_df %>%
+  filter(stri_detect(sample, regex = "MEP") | stri_detect(sample, regex = "MFP") | stri_detect(sample, regex = "F0_100")) %>%
+  ungroup() %>% 
+    unique() %>% # and another set of locus-integration??
+  group_by(group, locus, species) %>%
+  mutate(tax.rank = ifelse(match == "species", 1, 2)) %>%
+    mutate(tax.rank = ifelse(match == "genus", 2, tax.rank)) %>%
+    mutate(best.rank = min(tax.rank)) %>% # I want the highest ranked taxonomic rank for each locus, species, sample combo
+  mutate(total_reads = sum(sum_reads)) %>%
+  filter(tax.rank == best.rank) %>%
+  ungroup() %>%
+  group_by(group, locus) %>%
+  mutate(prop_reads = total_reads/(sum(total_reads))) %>% # calculate the proportion of reads for each taxon/locus
+  left_join(., mock_pool_inputs) # add the information about % fish back for ordering the species
+```
+
+
+
+```{r plot-mock-pools}
+# create factor levels for the loci to control the order
+MP_rep_integr$match <- factor(MP_rep_integr$match, levels = c("species", "genus"))
+MP_rep_integr$loc <- factor(MP_rep_integr$locus, levels = c("fishminiA", "nsCOIFo", "cep", "mifish"))
+
+MP_rep_integr_inputs <- MP_rep_integr %>%
+  #mutate(group = ifelse(group == "feed", "100% fishmeal", group)) %>%
+  mutate(input = ifelse(group == "mock_feed_pool", MFP_conc, NA)) %>%
+    mutate(input = ifelse(group == "mock_equal_pool", MEP_conc, input)) %>%
+  arrange(input) %>%
+  mutate(fishmeal_prop = ifelse(group == "feed", percent_fishmeal, NA)) %>%
+  mutate(input = ifelse(group == "feed", MFP_conc, input)) 
+
+```
+
+
+## Different version
+
+I also need to add a factor to the groups so that I can organize the mock equal pool (A), the mock feed pool (B), and the 100% fishmeal (C).
+
+```{r}
+MP_rep_integr_inputs$group <- factor(MP_rep_integr_inputs$group, levels = c("feed", "mock_feed_pool", "mock_equal_pool"))
+
+# use the factor levels to remove the NA for fishmeal % from the legend 
+MP_rep_integr_inputs$fishmeal_prop <- factor(MP_rep_integr_inputs$fishmeal_prop, levels = c("0.01", "0.1", "1", "1.91", "3.65", "13.32"))
+
+```
+
+### Mock feed data
+
+Using this dataframe that has optimized hits to reference taxa (not using consensus taxonomy)
+```{r}
+# this is the df that includes all the feeds and pools
+mock_genus_df 
+
+```
+
+Merge replicates
+```{r feeds-replicates-merged}
+feeds_rep_integr <- mock_genus_df %>%
+  filter(group == "feed") %>%
+  ungroup() %>% 
+    unique() %>% # and another set of locus-integration
+  group_by(filler, perc_fishmeal, locus, species) %>% # filler and perc_fishmeal distinguish samples
+  mutate(tax.rank = ifelse(match == "species", 1, 2)) %>%
+    mutate(tax.rank = ifelse(match == "genus", 2, tax.rank)) %>%
+    mutate(best.rank = min(tax.rank)) %>% # I want the highest ranked taxonomic rank for each locus, species, sample combo
+  mutate(total_reads = sum(sum_reads)) %>%
+  filter(tax.rank == best.rank) %>%
+  ungroup() %>%
+  group_by(filler, perc_fishmeal, locus) %>%
+  mutate(prop_reads = total_reads/(sum(total_reads))) %>% # calculate the proportion of reads for each taxon/locus
+  left_join(., mock_pool_inputs) %>% # add the information about % fish back for ordering the species
+  select(-ng_per_ul_MEP, -ng_MFP, -ng_MEP, -MEP_conc, -MFP_conc)
+  
+# everything is working properly with the groups and proportions 
+feeds_rep_integr %>%
+  summarise(sum(prop_reads))
+
+# all 30 reference taxa
+feeds_rep_integr %>%
+  ungroup() %>%
+  select(species) %>%
+  unique()
+```
+
+```{r calculate-prop-reads}
+# from the integrated replicates df
+feeds_props_fixed <- feeds_rep_integr %>%
+  select(-tax.rank, -best.rank, -sample.y, -total_reads, -prop_reads) %>% # clean up some of the extraneous columns
+  ungroup() %>%
+  group_by(locus, species, filler, perc_fishmeal) %>%
+  mutate(mean_taxa_reads = mean(sum_reads)) %>% # mean reads per species across replicates (within loci)
+  ungroup() %>%
+  arrange(species) %>%
+  group_by(locus, sample) %>%
+  mutate(total_replicate_reads = sum(sum_reads)) %>%
+  ungroup() %>%
+  group_by(locus, filler, perc_fishmeal) %>%
+  mutate(mean_replicate_reads = mean(total_replicate_reads)) %>%
+  mutate(mean_taxa_prop = mean_taxa_reads/mean_replicate_reads) %>%
+  select(-sum_reads, -sample, -total_replicate_reads, -mean_replicate_reads) %>%
+  unique() %>%
+  ungroup() 
+
+```
+
+Take a look at the affect of % fishmeal in the overall feed (using filler 1)
+To spread out the entries on the x-axis (so they're not just in linear bins), I will calculate the Taxon proportion per sample mixture and then log-scale, where 
+
+Proportion = % fishmeal in the feed x % taxon tissue in the fishmeal
+
+```{r calculate-prop-of-mix-per-taxon}
+# I need to change the % columns to proportions and then multiply them to come up with the proportion of each taxon in each mixture
+feeds_prop_df <- feeds_props_fixed %>%
+  mutate(prop_mixture = perc_fishmeal/100) %>%
+  mutate(taxon_prop = percent_fishmeal/100) %>%
+  mutate(prop_x_fish = taxon_prop*prop_mixture)
+
+# change perc_fishmeal to be a discrete variable for plotting color
+feeds_prop_df$perc_fishmeal <- factor(feeds_prop_df$perc_fishmeal, levels = c(0,2,10,25,100))
+
+# set the factor order for the loci
+feeds_prop_df$locus <- factor(feeds_prop_df$locus, levels = c("mifish", "cep", "nsCOIFo", "fishminiA"))
+```
+
+
+## Parallel charts
+
+A good way to present this might be a parallel chart - where I can connect the taxa across the different levels of input.
+
+```{r parallel-chart-F1-df}
+new_F1_df <- feeds_prop_df  %>%
+  filter(filler == "F1" & perc_fishmeal != 0) %>%
+  mutate(log_mean_prop_reads = log(mean_taxa_prop)) %>%
+    select(locus, species, perc_fishmeal, percent_fishmeal, log_mean_prop_reads) %>%
+    pivot_wider(names_from = perc_fishmeal, names_prefix = "%fishmeal_", values_from = log_mean_prop_reads) %>%
+    select(locus, species, percent_fishmeal, "%fishmeal_2", "%fishmeal_10", "%fishmeal_25")
+    
+new_F1_df$percent_fishmeal <- factor(new_F1_df$percent_fishmeal, levels = c(13.32, 3.65, 1.91, 1, 0.1, 0.01))
+
+# plot color scheme
+new.pal2 <- c("seashell3", "goldenrod2", "lightsalmon", "darkorange3" ,"tomato3","sienna4")
+
+# plot prep
+F1plot <- ggparcoord(new_F1_df, columns = 4:6, groupColumn = "percent_fishmeal",
+          scale="globalminmax",
+          showPoints = TRUE) +
+  theme_minimal() +
+  labs(color = "% tissue in fishmeal") +
+  scale_color_manual(values = rev(new.pal2)) +
+  xlab("% fishmeal in mock feed") +
+   scale_x_discrete(labels=c("2%", "10%", "25%"), expand = c(0.1, 0.1)) +
+   ylab("Proportion of sequencing reads (log)")
+  
+
+F1plot + facet_grid(cols = vars(locus), labeller = label_both) +
+  theme(
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10)),
+  )
+
+ggsave("pdf_outputs/mockfeed_F1_parallel_chart.pdf", width = 10, height = 5)
+```
+
+
+Update: October 2020: Nina commented that there is more gray and yellow toward the bottom of the plot, which is consistent with lower tissue inputs = fewer sequencing reads. However, there are a few examples where one taxon added at 0.1% receives a surprising proportion of reads in 1-2 loci. But, there are no examples of 0.01% taxa receiving a large proportion of reads.
+
+Can I quantify that?
+Maybe using the average read depth/taxa for each % tissue "bin?"
+```{r make-fig-SI}
+feeds_prop_df  %>%
+  filter(filler == "F1" & perc_fishmeal != 0) %>%
+  #filter(locus == "fishminiA") %>%
+  #filter(perc_fishmeal == 2) %>%
+  group_by(locus, percent_fishmeal, perc_fishmeal) %>%
+  summarise(mean(mean_taxa_prop)) %>%
+  rename(perc_tissue_mixture = perc_fishmeal, mean_prop_of_reads_per_taxon = `mean(mean_taxa_prop)`) %>%
+  ggplot(aes(x = log(percent_fishmeal), y = mean_prop_of_reads_per_taxon, color = perc_tissue_mixture)) +
+  geom_point() +
+  theme_bw() +
+  xlab("% tissue input (log-scaled)") +
+  ylab("Mean proportion of reads per taxon") +
+  labs(color = "% fishmeal in \n experimental feed") +
+  theme(
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10))
+  ) +
+  facet_wrap(.~locus)
+  
+ggsave("pdf_outputs/SI_fig_mean_prop_reads_by_locus.pdf", width = 8, height = 6)
+```
+The prop. of sequencing reads does relate to the input tissue amount on an averaged basis, but not for any individual taxon.
+
+```{r make-supplemental-figure-4a}
+mockfeed_plotct <- feeds_prop_df  %>%
+  filter(filler == "F1" & perc_fishmeal != 0) %>%
+  filter(percent_fishmeal < 2) %>%
+  select(locus, species, perc_fishmeal, percent_fishmeal) %>%
+  unique() %>%
+  group_by(locus, perc_fishmeal, percent_fishmeal) %>%
+  tally(name = "n_taxa") %>%
+  arrange(percent_fishmeal, locus) %>%
+  mutate(prop = n_taxa/5) %>%
+  ggplot(aes(x = locus, y = factor(prop), fill = percent_fishmeal)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_grid(rows = vars(perc_fishmeal), cols = vars(percent_fishmeal)) +
+  theme_bw() +
+  ylab("Proportion of taxa recovered") +
+  xlab("Locus") +
+  labs(fill = "% tissue in fishmeal")
+
+mockfeed_plotct +
+  theme(
+        axis.text.x = element_text(angle = 90, hjust = 0.95),
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10))
+  )
+
+# ggsave("pdf_outputs/mockfeed_perc_dropout_by_locus_low_tissue_input.pdf", width = 7, height = 4)
+```
+
+
+## Compare fillers
+
+```{r}
+# facet labels
+fillers_df <- feeds_prop_df %>%
+  filter(filler %in% c("F1", "F2")) %>%
+  filter(perc_fishmeal == 25)
+
+fillers_df$f2 <- factor(fillers_df$filler, labels = c("F1: soy", "F2: bloodmeal, feathermeal, grasses"))
+
+```
+
+Is this so consistent bec of the means? Or the species-amplification biases are consistent regardless of filler?
+
+
+```{r parallelchart-filler-type}
+# select just the columns of interest
+pchart_df <- fillers_df %>%
+  mutate(log_prop_reads = log10(mean_taxa_prop)) %>%
+  #select(locus, species, filler, perc_fishmeal, mean_taxa_prop, percent_fishmeal) %>%
+  select(locus, species, filler, perc_fishmeal, percent_fishmeal, log_prop_reads) %>%
+  #pivot_wider(names_from = filler, values_from = mean_taxa_prop)
+  pivot_wider(names_from = filler, values_from = log_prop_reads)
+
+pchart_df$p_fish_in_meal <- factor(pchart_df$percent_fishmeal, levels = c(13.32, 3.65, 1.91, 1, 0.1, 0.01))
+
+fplot3 <- ggparcoord(pchart_df, columns = 5:6, groupColumn = "p_fish_in_meal",
+          scale="globalminmax",
+          showPoints = TRUE) +
+  theme_minimal() +
+  labs(color = "% taxon in fishmeal") +
+  scale_color_manual(values = rev(new.pal2)) +
+  xlab("Filler type") +
+  scale_x_discrete(labels=c("soy", 
+                        "animal/plant"), expand = c(0.15, 0.15)) +
+  ylab("Proportion of reads (log)")
+  
+
+fplot3 + facet_grid(cols = vars(locus), labeller = label_both) +
+  theme(
+    axis.title.x = element_text(margin = margin(t = 15), size = 11),
+    axis.title.y = element_text(margin = margin(r = 15), size = 11),
+    axis.text = element_text(size = 11)
+  )
+
+ggsave("pdf_outputs/filler_parallel_chart_cols.pdf", height = 5, width = 12)
+```
+
+
+Check on the lowest level inputs (0.1% and 0.01%) to see if additional taxa drop out.
+```{r make-supplemental-figure-4}
+fillplotct <- fillers_df %>%
+  filter(percent_fishmeal < 2) %>%
+  select(locus, species, filler, percent_fishmeal) %>%
+  unique() %>%
+  group_by(locus, filler, percent_fishmeal) %>%
+  tally(name = "n_taxa") %>%
+  arrange(percent_fishmeal, locus) %>%
+  mutate(prop = n_taxa/5) %>%
+  ggplot(aes(x = locus, y = factor(prop), fill = percent_fishmeal)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_grid(rows = vars(filler), cols = vars(percent_fishmeal)) +
+  theme_bw() +
+  ylab("Proportion of taxa recovered") +
+  xlab("Locus") +
+  labs(fill = "% tissue in fishmeal")
+
+fillplotct +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.95),
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10))
+  )
+
+#ggsave("pdf_outputs/filler_dropout_by_locus_low_tissue_input.pdf", width = 7, height = 4)
+```
+Each locus recovers fewer taxa at the lower % fishmeal, but they compensate for one another.
+
+There should be 4 categories at < 2% tissue:
+0.01
+0.1
+1
+1.91
+
+
+## Compare mock feed pools with feeds: proportion of sequencing reads and input amount
+
+
+```{r read-count-scaled-pool-feed-plot}
+# make figure for manuscript
+feed_pool_input <- MP_rep_integr_inputs # make a new version
+
+# set factor levels
+feed_pool_input$perc_fish <- factor(feed_pool_input$percent_fishmeal, levels = c(13.32, 3.65, 1.91, 1, 0.1, 0.01))
+
+# set the breaks
+read_breaks <- c(0.01, 0.05, 0.1, 0.2)
+# and the color scheme
+new.pal3 <- c("seashell3", "goldenrod2", "lightsalmon", "darkorange3" ,"tomato3","sienna4")
+
+# set the factor levels for the input species
+feed_pool_input$sp <- factor(feed_pool_input$species, levels = unique(feed_pool_input$species))
+
+# plot
+MP_reps_merged_newcols <-ggplot(data = feed_pool_input, aes(x = reorder(sp, percent_fishmeal) , y = fct_inorder(loc), color = perc_fish, size = prop_reads)) +
+  geom_point() +
+  theme_bw() +
+  ylab("Locus") +
+  xlab("Reference taxa") +
+  labs(size = "Proportion of reads") +
+  scale_color_manual(values = rev(new.pal3), guide = "none") +
+  scale_size_continuous(breaks = read_breaks)
+
+
+p <- MP_reps_merged_newcols + facet_grid(group ~ .) +
+  theme(
+    axis.text.x = element_text(angle = 90, size = 10, hjust = 0.95, face = "italic"),
+    axis.text.y = element_text(size = 10),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 12),
+    axis.title = element_text(size = 12),
+    axis.title.x = element_text(margin = margin(t = 15, r = 0, b = 0, l = 0)),
+    axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)))
+
+mockepool <- subset(feed_pool_input, group == "mock_equal_pool")
+
+p + geom_point(data = mockepool, color = "black")
+
+# save that
+ggsave("pdf_outputs/MockPools_100fishmeal_genus_decon_merged_reps_inputDNA.pdf", width = 10, height = 7)
+
+```
