@@ -1,0 +1,99 @@
+---
+title: "taxonomy: integration of multiple taxonomic levels within each locus"
+output: html_notebook
+---
+
+What I ulimately want, is, for each sample, the highest (accurate!) resolution taxonomy within each locus. 
+
+That is the first stage of data integration and would be used for analyses that compare loci.
+
+An additional step of data integration is necessary once I have my optimal loci selected, which would include integrating the taxonomic resolution of the combined markers.
+
+Beginning with the taxonomy files generated in `01-taxonomy-filter-BLAST-hits.Rmd` and the decontamined feature dataframe.
+
+```{r load-data-and-libraries}
+library(tidyverse)
+library(stringi)
+library(readxl)
+
+# feature table - filtered based on occupancy modeling and dissimilarities
+feature_df <- readRDS("../extdata/downsampled_loci/data/feature_table_sodm_bray_filtered.rds")
+
+# taxonomy
+tax_df_clean_slim <- read_rds("../extdata/downsampled_loci/data/uncollapsed_taxonomy_spp_98.rds")
+clean_taxonomy_df_unique <- read_rds("../extdata/downsampled_loci/data/unique_taxonomy_spp_98.rds")
+
+```
+
+
+Combine taxonomy and feature table
+```{r}
+# using the uncollapsed taxonomny data frame
+features_taxa_df <- feature_df %>%
+  left_join(., tax_df_clean_slim) %>%
+  filter(!is.na(taxon)) # remove the sequence counts for things that are not matching taxonomy (at this point)
+
+```
+
+The procedure to begin this taxonomic-integration within each locus:
+First: group by sample, locus, species
+Then, a rank is assigned to each taxonomic level
+The dataframe entry in which the taxonomic rank = the best rank (for that species) is retained, collapsing the dataframe down to just the top taxonomic hits per species.
+
+The first order of business is to reduce these down to a single entry per species
+```{r enumerate-taxonomic-ranks}
+# beginning with the ASV-taxonomy dataframe
+loc_integrated_df <- features_taxa_df %>%
+  ungroup() %>%
+    mutate(tax.rank = ifelse(taxonomic_level == "species", 1, 2)) %>%
+    mutate(tax.rank = ifelse(taxonomic_level == "genus", 2, tax.rank)) %>%
+    mutate(tax.rank = ifelse(taxonomic_level == "family", 3, tax.rank)) %>%
+      mutate(tax.rank = ifelse(taxonomic_level == "order", 4, tax.rank)) %>%
+        mutate(tax.rank = ifelse(taxonomic_level == "class", 5, tax.rank)) %>%
+        mutate(tax.rank = ifelse(taxonomic_level == "phylum", 6, tax.rank)) %>%
+          mutate(tax.rank = ifelse(taxonomic_level == "domain", 7, tax.rank)) %>%
+    group_by(locus, sample, species) %>% 
+    mutate(best.rank = min(tax.rank)) %>% # I want the highest ranked taxonomic rank for each locus, species, sample combo
+  filter(tax.rank == best.rank) %>% # this dataframe still includes duplicates for all of the entries above species.
+  group_by(locus, sample, species, genus, family, taxon_percID, taxonomic_level, tax.rank, best.rank) %>%
+  unique() %>%
+  ungroup() %>%
+  filter(!taxonomic_level %in% c("order", "phylum", "domain", "class")) %>% # remove these now. If I want them in, I need to add additional mutate functions to collapse them.
+  mutate(species = ifelse(taxonomic_level == "genus", paste0(genus, "_sp."), species)) %>%
+  mutate(genus = ifelse(taxonomic_level == "family", paste0(family, "_sp."), genus)) %>%
+    mutate(species = ifelse(taxonomic_level == "family", paste0(family, "_sp."), species)) %>%
+  unique()
+
+```
+
+
+The goal here is to eliminate duplicate entries without losing information about the taxon_percent, and then to summarise the number of reads for that species designation
+```{r deal-with-duplicate-entries}
+more_loc_integration <- loc_integrated_df %>%
+  group_by(locus, seq, sample, species, genus, family, taxonomic_level, taxon) %>%
+  mutate(top_perc = rank(-taxon_percID, ties.method = "min")) %>%
+  ungroup() %>%
+  group_by(locus, sample, family) %>%
+  filter(top_perc < 2) %>%
+  mutate(top_percent = rank(-taxon_percID, ties.method = "min")) %>%
+  group_by(locus, sample, species, genus, family, taxonomic_level, taxon, top_percent) %>%
+  summarise(sum_reads = sum(count)) %>% # now I can summarise reads within a species
+  ungroup() %>%
+  group_by(locus, sample, family) %>% # if family is the highest rank I'm including then that makes sense here
+  mutate(total_reads = sum(sum_reads)) %>%
+  filter(top_percent < 2) %>% 
+  ungroup()
+
+```
+
+That accomplishes the species integration at the locus-level. 
+
+Save the within-locus integrated taxonomy dataframe - keeping in mind that this only gets to family-level, which is really where any distinguishing taxonomy breaks down for a large number of our reference species.
+
+```{r save-integrated-df}
+more_loc_integration %>%
+  select(-top_percent, -sum_reads) %>%
+  saveRDS(file = "../data/reference_mock_communities_within_locus_integration.rds", compress = "xz")
+
+```
+

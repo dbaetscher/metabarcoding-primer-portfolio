@@ -1,0 +1,493 @@
+---
+title: "Read counts summary"
+output: html_notebook
+---
+
+27 Oct 2020
+
+From the initial taxonomy and feature table data frames, I want to summarize how many reads were on-target (assigned to reference taxa in our custom db) per locus and slim the feature table df down to just the ASVs that have taxonomy assigned for the data decontamination steps and analysis of extraction blanks and negative controls.
+
+
+```{r load-libraries-and-data}
+library(tidyverse)
+library(stringi)
+library(readxl)
+
+# feature table df
+feature_df_no_eDNA <- readRDS("../extdata/downsampled_loci/data/downsampled_features_df.rds")
+
+# taxonomy table df
+taxonomy_df  <- readRDS("../extdata/downsampled_loci/data/taxonomy_ASV_BLAST_hits_fixed_accession.rds")
+
+
+# metadata
+meta <- read_csv("../data/jan_sample_list.csv")
+
+
+# new taxonomy... probably need to check this.
+uncollapsed_taxonomy_spp_98 <- read_rds("../extdata/downsampled_loci/data/uncollapsed_taxonomy_spp_98.rds")
+unique_taxonomy_spp_98 <- read_rds("../extdata/downsampled_loci/data/unique_taxonomy_spp_98.rds")
+
+# the four loci
+four_loc <- c("mifish", "nsCOIFo", "fishminiA", "cep")
+
+# read in the species and proportions
+mock_spp <- read_csv("../data/mock_spp_pool.csv")
+
+```
+
+
+```{r reads-from-feature-df}
+feature_df_no_eDNA %>%
+  #filter(str_detect(sample, "RP")) %>% # how many reads per locus in just the reference pools?
+  group_by(locus) %>%
+  summarise(total_reads = sum(count)) %>%
+  ggplot(aes(x = locus, y = total_reads)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme(
+  axis.text.x = element_text(angle = 90),
+  axis.title.x = element_text(margin = margin(t = 10)),
+  axis.title.y = element_text(margin = margin(r = 10))
+    
+  )
+  
+```
+
+
+```{r read-count}
+# total merged, paired-end reads from dada2
+sum_no_eDNA <- feature_df_no_eDNA %>%
+  summarise(sum(count))
+
+# and how many unique ASVs?
+feature_df_no_eDNA %>%
+  select(locus, seq) %>%
+  unique()
+```
+
+277,021,343 total reads
+62,764 unique locus-ASVs
+
+
+
+Now bind that together with the taxonomy df so that only those ASVs that are metazoa are retained.
+```{r}
+features_w_taxonomy <- feature_df_no_eDNA %>%
+  semi_join(., taxonomy_df, by = c("locus", "seq"))
+# use a semi_join here to avoid including duplicate rows of the feature table for each taxonomy entry since there are duplicates for each locus-ASV at this stage
+
+# how many reads/ASV
+
+features_w_taxonomy %>%
+  summarise(sum(count))
+```
+
+244,444,202 total reads (out of 277,021,343)
+Which is pretty good for a conversion!
+```{r}
+244444202/277021343
+```
+88.2% of total reads match taxa in our custom db
+
+
+
+How many ASVs?
+```{r}
+features_w_taxonomy %>%
+  select(locus, seq) %>%
+  unique()
+```
+
+12,792 ASVs retained (out of 62,764)
+```{r}
+12792/62764
+```
+Which is only ~20.4% of ASVs... this is where the small number of reads for a large number of non-target ASVs comes into play.
+
+
+What % of reads matched taxa in the metazoan database?
+```{r}
+feature_df_no_eDNA %>%
+  left_join(., unique_taxonomy_spp_98) %>%
+  mutate(grp = ifelse(is.na(taxon), "non-metazoan", "metazoan")) %>%
+  group_by(grp) %>%
+  summarise(reads = sum(count)) %>%
+  mutate(total_reads = sum(reads)) %>%
+  mutate(prop_reads = reads/total_reads)
+
+```
+
+
+```{r}
+# understanding the composition of blanks and controls
+feature_df_no_eDNA %>%
+  #left_join(., unique_taxonomy_spp_98) %>%
+  filter(str_detect(sample, "EXB") | str_detect(sample, "NEG")) %>%
+  #mutate(grp = ifelse(is.na(taxon), "non-metazoan", "metazoan")) %>%
+  #filter(grp == "non-metazoan") %>%
+  select(locus, seq) %>% # NEED to include the locus here
+  unique()
+
+```
+total of 2,144 ASVs in the blanks and controls
+
+And how many of the unassigned ASVs were found only in the blanks and controls?
+```{r}
+not_blanks <- feature_df_no_eDNA %>%
+  left_join(., unique_taxonomy_spp_98) %>%
+  filter(!str_detect(sample, "EXB") & !str_detect(sample, "NEG")) %>%
+  mutate(grp = ifelse(is.na(taxon), "non-metazoan", "metazoan")) %>%
+  filter(grp == "non-metazoan") %>%
+  select(locus, seq) %>% # NEED to include the locus here
+  unique()
+
+
+only_in_blanks <- feature_df_no_eDNA %>%
+  left_join(., unique_taxonomy_spp_98) %>%
+  filter(str_detect(sample, "EXB") | str_detect(sample, "NEG")) %>%
+  mutate(grp = ifelse(is.na(taxon), "non-metazoan", "metazoan")) %>%
+  filter(grp == "non-metazoan") %>%
+  select(locus, seq, sample) %>% # NEED to include the locus here
+  unique()
+  
+only_in_blanks %>%
+  right_join(., not_blanks) %>%
+  filter(!is.na(sample))
+```
+95 locus-ASVs are in both extraction blanks and samples.
+
+```{r}
+# 1824 locus-ASVs in blanks
+# 95 of those overlap with samples
+
+1824-95 # unique to blanks
+
+# what % is that?
+1729/49972
+```
+
+What % of the blanks ASVs are non-metazoan?
+```{r}
+1824/2144
+```
+What % of the reads didn't match metazaon?
+```{r}
+feature_df_no_eDNA %>%
+  left_join(., unique_taxonomy_spp_98) %>%
+  filter(str_detect(sample, "EXB") | str_detect(sample, "NEG")) %>%
+  mutate(grp = ifelse(is.na(taxon), "non-metazoan", "metazoan")) %>%
+  group_by(grp) %>%
+  summarise(reads = sum(count)) %>%
+  mutate(total_reads = sum(reads)) %>%
+  mutate(prop_reads = reads/total_reads)
+
+```
+
+
+
+
+### Negative controls
+
+It seems like the logical path forward is to report the negatives, but not to remove taxa because the negatives across samples are not consistent and it's better not to introduce a bias in that respect.
+
+Also important here to acknowledge that the lab work was not performed in a clean lab and that extraction blanks and PCR negatives were sequenced with equal depth to the other samples (so read counts are artificially higher for the small number of molecules that were likely inputs).
+
+
+I could imagine a plot like that in supplemental - to indicate that the overall read counts were very low comparably for the extraction blanks and negative controls.
+
+What I really want to highlight are the reads that have: 
+1) taxonomic info
+2) reference taxa 
+3) Gallus/Sus sp.
+
+
+Mock feed species
+```{r}
+# create a vector of those spp
+m.species <- mock_spp$species
+m.genera <- mock_spp$genus
+m.family <- mock_spp$family
+
+```
+
+
+Question: do the feeds with F2 consistently have a larger proportion of "other metazoan" reads?
+
+## Update: 19 Oct 2020
+
+```{r simplify-read-calcs}
+# beginning with a df with just the feeds and controls
+# one entry per sequence
+# including only the porfolio of four primer sets
+feed_reads_replot <- feature_df_no_eDNA %>% 
+  filter(!str_detect(sample, "RP")) %>% # remove the reference pools
+  filter(!str_detect(sample, "MEP") & !str_detect(sample, "MFP")) %>% # remove the mock pools
+  left_join(., unique_taxonomy_spp_98) %>% # add the taxonomy to relevant entries
+  filter(locus %in% c(four_loc)) %>% # include just the portfolio of four loci
+  left_join(., meta) %>% # add the meta data with new feed names
+  mutate(sample = ifelse(str_detect(sample, "F"), new_name, sample)) %>% # use the "new names" for the feed samples bec they have consistent syntax
+  mutate(fishmeal.taxa = ifelse(taxon %in% c(m.species), "spp", NA)) %>%
+  mutate(fishmeal.taxa = ifelse(taxon %in% c(m.genera), "genus", fishmeal.taxa)) %>%
+  mutate(fishmeal.taxa = ifelse(taxon %in% c(m.family), "family", fishmeal.taxa)) %>%
+  #mutate(metazoan = ifelse(is.na(taxon), "no", "yes")) %>%
+  mutate(fishmeal.taxa = ifelse(str_detect(taxon, "Sus"), "Sus_sp.", fishmeal.taxa)) %>%
+  mutate(fishmeal.taxa = ifelse(str_detect(taxon, "Gallus"), "Gallus_sp.", fishmeal.taxa)) %>%
+  mutate(fishmeal.taxa = ifelse(is.na(taxon), "non-metazoan", fishmeal.taxa)) %>%  
+  mutate(fishmeal.taxa = ifelse(is.na(fishmeal.taxa), "other-metazoan", fishmeal.taxa)) %>%  
+  group_by(sample, taxon, fishmeal.taxa) %>%
+  summarise(total_reads = sum(count)) %>%
+  # add back in the % fishmeal to get the order right
+  left_join(., meta, by = c("sample" = "new_name")) %>%
+  #mutate(perc_fishmeal = ifelse(str_detect(sample, "F0"), 100, perc_fishmeal)) %>% # this needs to be made explicit bec of the new sample name
+  mutate(perc_fishmeal = ifelse(is.na(perc_fishmeal), -1, perc_fishmeal)) %>%
+  arrange(perc_fishmeal)
+# manually set the factor levels for the taxa legend
+feed_reads_replot$fishmeal.taxa <- factor(feed_reads_replot$fishmeal.taxa, levels = c("spp", "genus", "family", "Sus_sp.", "Gallus_sp.", "other-metazoan", "non-metazoan"))
+
+  
+# plot that with all the factors in order
+feed_reads_replot %>%
+  ggplot(aes(x = reorder(sample, perc_fishmeal), y = total_reads, fill = fishmeal.taxa)) +
+  geom_bar(stat = "identity", position = "stack") + 
+  theme_minimal() +
+  xlab("Sample_extraction replicate_PCR replicate") +
+  ylab("Sequencing reads") +
+  scale_fill_manual(values = c("darkblue", "mediumblue", "lightblue", "goldenrod", "orange", "gray30", "gray50")) +
+  theme(
+  axis.text.x = element_text(angle = 90),
+  axis.title.x = element_text(margin = margin(t = 10)),
+  axis.title.y = element_text(margin = margin(r = 10))
+)
+  
+```
+
+And now the question is one of proportions: in the 0% fishmeal samples, what proportion of the sequencing reads are going to Sus and Gallus?
+```{r}
+feed_reads_replot %>%
+  filter(perc_fishmeal == 0) %>%
+  mutate(filler2_spp = ifelse(str_detect(fishmeal.taxa, "Sus_sp.") | str_detect(fishmeal.taxa, "Gallus_sp."), "yes", "no")) %>%
+  mutate(fish_spp = ifelse(fishmeal.taxa %in% c("spp", "genus", "family"), "fish", "no")) %>%
+  group_by(filler, sample, filler2_spp, fish_spp) %>%
+  summarise(reads = sum(total_reads)) %>%
+  ungroup() %>%
+  group_by(sample) %>%
+  mutate(total_reads = sum(reads)) %>%
+  mutate(prop_grp_reads = reads/total_reads) %>%
+  # so for filler 2, do we have a lower proportion of fish reads because we have the Sus and Gallus reads?
+  # average fish reads for filler 1 and filler 2?
+  filter(fish_spp == "fish") %>%
+  group_by(filler) %>%
+  summarise(mean_prop_fish_reads = mean(prop_grp_reads))
+
+```
+And what about the mean non-fish reads for filler 1 and filler 2?
+```{r non-fish-filler-reads}
+feed_reads_replot %>%
+  filter(perc_fishmeal == 0) %>%
+  mutate(filler2_spp = ifelse(str_detect(fishmeal.taxa, "Sus_sp.") | str_detect(fishmeal.taxa, "Gallus_sp."), "yes", "no")) %>%
+  mutate(fish_spp = ifelse(fishmeal.taxa %in% c("spp", "genus", "family"), "fish", "no")) %>%
+  group_by(filler, sample, filler2_spp, fish_spp) %>%
+  summarise(reads = sum(total_reads)) %>%
+  ungroup() %>%
+  group_by(sample) %>%
+  mutate(total_reads = sum(reads)) %>%
+  mutate(prop_grp_reads = reads/total_reads) %>%
+  # so for filler 2, do we have a lower proportion of fish reads because we have the Sus and Gallus reads?
+  # average Sus/Gallus reads for filler 1 and filler 2?
+  filter(filler2_spp == "yes") %>%
+  group_by(filler) %>%
+  summarise(mean_prop_filler2_reads = mean(prop_grp_reads))
+
+```
+25.7% of the reads for the 0% fishmeal from Filler 2 are for Sus and Gallus, whereas that number is (unsurprisingly) 0.1% for Filler 1.
+
+
+Compare that with Filler 2 and 25% fishmeal
+```{r}
+feed_reads_replot %>%
+  filter(perc_fishmeal == 25) %>%
+  mutate(filler2_spp = ifelse(str_detect(fishmeal.taxa, "Sus_sp.") | str_detect(fishmeal.taxa, "Gallus_sp."), "yes", "no")) %>%
+  mutate(fish_spp = ifelse(fishmeal.taxa %in% c("spp", "genus", "family"), "fish", "no")) %>%
+  group_by(filler, sample, filler2_spp, fish_spp) %>%
+  summarise(reads = sum(total_reads)) %>%
+  ungroup() %>%
+  group_by(sample) %>%
+  mutate(total_reads = sum(reads)) %>%
+  mutate(prop_grp_reads = reads/total_reads) %>%
+  # so for filler 2, do we have a lower proportion of fish reads because we have the Sus and Gallus reads?
+  # average Sus/Gallus reads for filler 1 and filler 2?
+  filter(filler2_spp == "yes") %>%
+  group_by(filler) %>%
+  summarise(mean_prop_filler2_reads = mean(prop_grp_reads))
+```
+
+
+### Read counts per primer set: negative controls and blanks
+
+Just read counts for the negatives and extraction blanks
+
+```{r}
+# all loci
+neg_blanks <- feature_df_no_eDNA %>%
+  left_join(., meta) %>%
+  filter(type %in% c("blank", "negative")) %>%
+  left_join(., unique_taxonomy_spp_98) %>%
+  #mutate(taxon = ifelse(is.na(taxon), "non metazoan", taxon)) %>%
+  group_by(sample) %>%
+  mutate(total_reads = sum(count)) %>%
+  ungroup() %>%
+  group_by(locus) %>%
+  mutate(loc_reads = sum(count)) %>%
+  ggplot(aes(x = sample, y = total_reads, fill = taxon)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~locus) +
+  theme_bw()
+  
+neg_blanks +
+  theme(
+  axis.text.x = element_text(angle = 90),
+  axis.title.x = element_blank(),
+  axis.title.y = element_text(margin = margin(r = 10)),
+  legend.position = "bottom",
+  legend.title = element_blank(),
+  legend.text = element_text(size = 6)
+)
+
+```
+
+
+## read summary for reference pools
+
+```{r read-calcs-ref-pools}
+# beginning with a df with just the reference pools and controls
+# one entry per sequence
+# including only the porfolio of four primer sets
+pools_reads_plot <- feature_df_no_eDNA %>% 
+  filter(str_detect(sample, "RP") | str_detect(sample, "EX") | str_detect(sample, "NEG")) %>% # just the reference pools
+  left_join(., unique_taxonomy_spp_98) %>% # add the taxonomy to relevant entries
+  mutate(ord = ifelse(str_detect(sample, "EX"), 1, 3)) %>%
+    mutate(ord = ifelse(str_detect(sample, "NEG"), 2, ord)) %>%
+  mutate(reads = ifelse(is.na(taxon), NA, "metazoa")) %>%
+  group_by(sample, reads, ord) %>%
+  summarise(total_reads = sum(count)) 
+# plot that 
+pools_reads_plot %>%
+  ggplot(aes(x = reorder(sample, ord), y = total_reads, fill = reads)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_minimal() +
+  xlab("Sample_extraction replicate_PCR replicate") +
+  ylab("Sequencing reads") +
+  #scale_fill_manual(values = c("darkblue", "mediumblue", "lightblue", "goldenrod", "orange", "gray30", "gray50")) +
+  theme(
+  axis.text.x = element_text(angle = 90),
+  axis.title.x = element_text(margin = margin(t = 10)),
+  axis.title.y = element_text(margin = margin(r = 10))
+)
+  
+#ggsave("pdf_outputs/SI_figure_reference_pools_reads_by_metazoa.pdf", width = 8, height = 5)
+```
+
+Also could use a boxplot to show the mean...
+```{r}
+feature_df_no_eDNA %>% 
+  filter(str_detect(sample, "RP")) %>% # just the reference pools
+  group_by(locus) %>%
+  mutate(cum_reads = sum(count)) %>%
+  #left_join(., unique_taxonomy_spp_98) %>% # add the taxonomy to relevant entries
+  mutate(`DNA pool` = ifelse(str_detect(sample, "FRP"), "FRP", "VRP")) %>%
+  group_by(sample, locus, `DNA pool`, cum_reads) %>%
+  summarise(total_reads = sum(count)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = reorder(locus, -cum_reads), y = total_reads, color = `DNA pool`)) +
+  theme_minimal() +
+  theme(
+  axis.text.x = element_text(angle = 90, hjust = 0.95),
+  axis.title.x = element_text(margin = margin(t = 10)),
+  axis.title.y = element_text(margin = margin(r = 10))
+) +
+  xlab("locus") +
+  ylab("sequencing reads")
+  
+
+ggsave("pdf_outputs/downsampled_SI_figure_reads_per_locus_boxplot.pdf", width = 8, height = 5)
+```
+the only loci with > 100,000 reads are those with multiple primers contributing (i.e., aquaF3a and aquaF3b were downsampled separately)
+
+
+Same figure, but keeping the y-axis consistent with the previous (non-downsampled) figure
+```{r}
+feature_df_no_eDNA %>% 
+  filter(str_detect(sample, "RP")) %>% # just the reference pools
+  group_by(locus) %>%
+  mutate(cum_reads = sum(count)) %>%
+  #left_join(., unique_taxonomy_spp_98) %>% # add the taxonomy to relevant entries
+  mutate(`DNA pool` = ifelse(str_detect(sample, "FRP"), "FRP", "VRP")) %>%
+  group_by(sample, locus, `DNA pool`, cum_reads) %>%
+  summarise(total_reads = sum(count)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = reorder(locus, -cum_reads), y = total_reads, color = `DNA pool`)) +
+  theme_minimal() +
+  ylim(0, 900000) +
+  theme(
+  axis.text.x = element_text(angle = 90, hjust = 0.95),
+  axis.title.x = element_text(margin = margin(t = 10)),
+  axis.title.y = element_text(margin = margin(r = 10))
+) +
+  xlab("locus") +
+  ylab("sequencing reads")
+
+
+ggsave("pdf_outputs/downsampled_SI_figure_reads_per_locus_boxplot_scaled.pdf", width = 8, height = 5)
+  
+```
+
+
+
+
+And to confirm, the summary distribution for reads/locus:
+```{r}
+# mean number of reads per locus for the reference pools?
+feature_df_no_eDNA %>% 
+  filter(str_detect(sample, "RP")) %>% # just the reference pools
+  group_by(locus, sample) %>%
+  mutate(cum_reads = sum(count)) %>%
+  select(locus, cum_reads) %>%
+  unique() %>%
+  arrange(desc(cum_reads)) %>%
+  ungroup() %>%
+  summarise(mean(cum_reads))
+
+```
+
+
+
+## ASVs found only in the extraction blanks and negatives (and not in the samples?)
+
+
+```{r}
+# features_w_taxonomy with no negative controls
+tax_feat_no_negs <- features_w_taxonomy %>%
+   filter(!str_detect(sample, "EXB") & !str_detect(sample, "NEG"))
+
+# total number of taxonomically assigned ASVs in the controls?
+features_w_taxonomy %>%
+  filter(str_detect(sample, "EXB") | str_detect(sample, "NEG")) %>%
+  select(locus, seq) %>%
+  unique() %>%
+  anti_join(., tax_feat_no_negs)
+
+```
+334 ASVs in the negatives and blanks and 189 of those ASVs are only found in the controls.
+
+
+## Save the feature table for subsequent analyses
+
+I'll use this dataframe for the occupancy modeling followed by the dissimilarity matricies.
+
+```{r}
+# this is the starting point for the decontamination, since we're only interested in the ASVs that match taxonomic hits
+features_w_taxonomy %>%
+  saveRDS("../extdata/downsampled_loci/data/feature_df_no_eDNA_metazoa_only.rds", compress = "xz")
+
+```
+

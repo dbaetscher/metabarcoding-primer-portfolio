@@ -1,0 +1,206 @@
+---
+title: "data import"
+output: html_notebook
+---
+
+18 May 2021 - import downsampled locus files for the taxonomy and feature tables, run through the metabarcoding pipeline on the cbsunt246 server.
+
+I re-ran 18 of 22 loci (and excluded the four loci that had very little data - teleo, 16Sfish, crust2, and 16Svar)
+
+Taxonomy files are in this directory:
+../extdata/downsampled_loci/taxonomy
+
+
+Feature table files are the existing files in this directory:
+../extdata/downsampled_loci/feature_tables
+
+
+## Create taxonomy dataframe
+
+```{r load-libraries}
+library(tidyverse)
+library(stringi)
+library(readxl)
+
+```
+
+
+First, create the list of files in a .txt doc
+```{sh, eval=FALSE}
+ls -l *_taxonomy.tab | awk 'BEGIN {print "locus", "file"} NR >1 && !/posinfo/ {num = $NF; gsub(/filename/, "", num); gsub(/[._].*$/, "", num);  print num, $NF}' > ../downsampled_taxonomy-file-list.txt 
+
+```
+
+```{r create-rds-for-taxonomy-table}
+# get the names of the files
+fdf <- read.table("/Users/dianabaetscher/Documents/git-repos/metabarcoding-primer-portfolio/extdata/downsampled_loci/downsampled_taxonomy-file-list.txt", stringsAsFactors = FALSE, header = TRUE) %>%
+  tbl_df()
+dir <- "/Users/dianabaetscher/Documents/git-repos/metabarcoding-primer-portfolio/extdata/downsampled_loci/taxonomy"
+
+# cycle over them, read them and add the locus column on each.
+# at the end, bind them together.
+taxa_dataframe <- lapply(1:nrow(fdf), function(i) {
+  read_tsv(paste(dir, fdf$file[i], sep = "/"), col_names = FALSE) %>%
+    mutate(locus = fdf$locus[i]) %>%
+    select(locus, everything())
+}) %>%
+  bind_rows() %>%
+  select(1:6, 12, 14) %>%
+  rename(seq = X1, taxonomy = X2, perc_id = X3, alignment_length = X4, mismatches = X5, eval = X11, accession = X13) %>%
+  filter(alignment_length > 50)
+
+```
+
+
+
+### Merge primer mixes
+
+Here I will merge the loci that are actually part of the same primer mix (but it wasn't clear how to have multiple linked adapters for a single locus in CUTADAPT). Likely, I will want to implement the locus-combining steps at an earlier stage (perhaps prior to sorting and assigning sequences to varying taxonomic resolution).
+
+```{r}
+# merge in the taxonomy table
+taxonomy_loc_collapsed <- taxa_dataframe %>%
+  ungroup () %>%
+    mutate(locus = ifelse(locus == "aquaF2b" | locus == "aquaF2a", "aquaF2", locus)) %>%
+    mutate(locus = ifelse(locus == "aquaF3b" | locus == "aquaF3a", "aquaF3", locus)) %>%
+    mutate(locus = ifelse(locus == "shark474b" | locus == "shark474a", "shark474", locus)) %>%
+    mutate(locus = ifelse(locus == "sharkCOIminib" | locus == "sharkCOIminia", "sharkCOImini", locus)) 
+
+# and save that
+saveRDS(taxonomy_loc_collapsed, "/Users/dianabaetscher/Documents/git-repos/metabarcoding-primer-portfolio/extdata/downsampled_loci/data/downsampled_taxonomy_df.rds", compress = "xz")
+
+```
+
+Make sure that all loci are present at this stage
+```{r}
+taxonomy_loc_collapsed %>%
+  select(locus) %>%
+  distinct()
+
+```
+All 22!
+
+## Create rds for feature tables
+
+```{sh, eval=FALSE}
+ls *.tsv | awk 'BEGIN {print "locus", "file"} NR >1 && !/posinfo/ {loc = $NF; gsub(/filename/, "", loc); gsub(/[._].*$/, "", loc);  print loc, $NF}' > ../downsampled_feature-table-file-list.txt 
+
+```
+
+
+```{r create-rds-for-feature-table}
+# get the names of the files
+fdf <- read.table("/Users/dianabaetscher/Documents/git-repos/metabarcoding-primer-portfolio/extdata/downsampled_loci/downsampled_feature-table-file-list.txt", stringsAsFactors = FALSE, header = TRUE) %>%
+  tbl_df()
+dir <- "/Users/dianabaetscher/Documents/git-repos/metabarcoding-primer-portfolio/extdata/downsampled_loci/feature_tables"
+
+# cycle over them, read them and add the locus column on each.
+# at the end, bind them together.
+featuretable_dataframe <- lapply(1:nrow(fdf), function(i) {
+  read_tsv(paste(dir, fdf$file[i], sep = "/"), skip = 1, col_names = TRUE) %>%
+    mutate(locus = fdf$locus[i]) %>%
+    select(locus, everything())
+}) %>%
+  bind_rows() %>%
+  rename(seq = `#OTU ID`) 
+
+feature_df <- featuretable_dataframe %>%
+    gather(key = sample, count, 2:length(featuretable_dataframe), -seq) %>%
+    filter(count > 0)
+
+```
+
+
+The loci with a/b suffixes are actually in the same primer mix, so those data should, ideally, be combined in some intelligent way.
+
+### Merge primer mixes
+
+Here I will merge the loci that are actually part of the same primer mix (but it wasn't clear how to have multiple linked adapters for a single locus in CUTADAPT). Likely, I will want to implement the locus-combining steps at an earlier stage (perhaps prior to sorting and assigning sequences to varying taxonomic resolution).
+```{r}
+# merge in the feature table
+features_loc_collapsed <- feature_df %>%
+  ungroup () %>%
+    mutate(locus = ifelse(locus == "aquaF2b" | locus == "aquaF2a", "aquaF2", locus)) %>%
+    mutate(locus = ifelse(locus == "aquaF3b" | locus == "aquaF3a", "aquaF3", locus)) %>%
+    mutate(locus = ifelse(locus == "shark474b" | locus == "shark474a", "shark474", locus)) %>%
+    mutate(locus = ifelse(locus == "sharkCOIminib" | locus == "sharkCOIminia", "sharkCOImini", locus)) 
+
+# just modify the downsampled loci
+loc_changed <- features_loc_collapsed %>%
+  filter(!locus %in% c("teleo", "crust2", "16Sfish")) %>%
+  # remove the "sub" prefix for the downsampled loci/samples
+  separate(sample, into = c("remove", "samp", "num", "n")) %>%
+  select(-remove) %>%
+  unite(sample, samp, num, n, sep = "_") 
+
+loc_unchanged <- features_loc_collapsed %>%
+  filter(locus %in% c("teleo", "crust2", "16Sfish"))
+
+# merge back together
+complete_loc_feature_tbls <- loc_changed %>%
+  bind_rows(loc_unchanged) 
+
+# and save that - ultimately, I might just keep this one
+saveRDS(complete_loc_feature_tbls, file = "/Users/dianabaetscher/Documents/git-repos/metabarcoding-primer-portfolio/extdata/downsampled_loci/data/downsampled_features_df.rds", compress = "xz")
+
+
+```
+
+
+## check on missing accession numbers
+
+```{r}
+missing_accession <- taxonomy_loc_collapsed %>%
+  filter(!stri_detect(taxonomy, regex = ";")) %>%
+  select(accession) %>%
+  unique()
+  
+```
+
+Two missing accession numbers -- they're probably in the manual file
+Read in the manually fixed accession data
+```{r}
+fixed_accession <- read_xlsx("../extdata/missing_accession_taxonomy_2020_04_30.xlsx")
+```
+
+
+Put them back together
+```{r}
+# first deal with a df that includes only the messed up accession number entries
+accession_df <- taxonomy_loc_collapsed %>%
+  filter(!stri_detect(taxonomy, regex = ";")) %>% #when the accession num ended up in the taxonomy, there are no ; separators
+  left_join(., fixed_accession, by = "accession") 
+
+ordered_accessions_df <- accession_df %>%
+  unite("taxonomy", 15:9, sep = ";") %>%
+  dplyr::select(locus, seq, taxonomy, perc_id, alignment_length, mismatches, eval, accession)
+  
+# Now that df is in the same format as the full df
+
+# make a df that does not include the entries we just updated
+the_rest <- taxonomy_loc_collapsed %>%
+  filter(stri_detect(taxonomy, regex = ";"))
+
+
+# combine the taxonomy that matched up properly with its lineage and the oddballs that I had to manually import
+merged_tax_df <- bind_rows(ordered_accessions_df, the_rest) %>%
+  unique()
+
+```
+After all of that, are there still accession numbers with missing taxonomy?
+
+```{r}
+merged_tax_df %>%
+  filter(taxonomy == "NA;NA;NA;NA;NA;NA;NA")
+
+```
+Nope. All accession numbers should be associated with taxonomic information.
+
+Save that output as input for the `taxonomy.Rmd`
+```{r}
+merged_tax_df %>% 
+  saveRDS("../extdata/downsampled_loci/data/taxonomy_ASV_BLAST_hits_fixed_accession.rds", compress = "xz")
+
+```
+
+

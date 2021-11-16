@@ -47,8 +47,7 @@ How many unique taxonomic hits
 unique_merged_tax_df %>%
   group_by(locus, seq) %>%
   tally() %>% 
-  ungroup() %>%
-  summarise(mean(n))
+  ungroup()
 
 ```
 
@@ -250,6 +249,7 @@ seq_hit_diff <- all_seqs %>%
 
 ``` 
 
+
 For sequences with multiple top hits, where the difference between ranked taxa = 0, I will end up defaulting to genus- or family-level ID (or carrying the individual species info around in some capacity). I will do the same for any sequences where the difference betweeen the first and second ranked taxa is < 2%.
 
 Because of the ranking ties = minimum, I actually don't know what the numerical rank is for the second best hit when there are duplicate first best hits.
@@ -342,6 +342,7 @@ single_taxa_not_spp_df <- bind_rows(single_spp_data, single_top_hit_data) %>%
   select(-perc_id)
   
 single_taxa_not_spp_df
+
 ```
 
 
@@ -397,7 +398,6 @@ multi_top_hit <- seq_hit_diff %>%
 multi_top_seqs <- multi_top_hit %>%
   select(locus, seq) %>%
   distinct()
-
 
 ```
 
@@ -561,9 +561,10 @@ clean_taxonomy_df_unique <- clean_taxonomy_df %>%
   unique()
 
 # how many seqs at each taxonomic level?
-clean_taxonomy_df_unique %>%
+#clean_taxonomy_df_unique %>%
+clean_taxonomy_df %>%
   ungroup() %>%
-  group_by(taxonomic_level) %>%
+  #group_by(taxonomic_level) %>%
   tally()
 
 clean_taxonomy_df_unique %>%
@@ -571,6 +572,7 @@ clean_taxonomy_df_unique %>%
   group_by(locus) %>%
   tally() %>%
   arrange(desc(n))
+
 ```
 There are 4144 species-level assignments.
 
@@ -653,5 +655,111 @@ saveRDS(unique_taxonomy_spp_98, "../data/unique_taxonomy_spp_98.rds", compress =
 
 ```
 
+## tracking down the 18 ASVs that are missing from the final taxonomy df
 
+```{r 18-missing-ASVs-to-find}
+### hunting down the discrepancies:
+test2 <- clean_taxonomy_df_unique %>%
+  select(locus, seq)
 
+test1 <- taxa_dataframe %>%
+  select(locus, seq) %>%
+  distinct()
+
+missing_asvs <- test1 %>%
+  anti_join(., test2)
+
+# missing ASVs present in taxonomy df
+missing_asvs %>%
+  left_join(., taxonomy_fixed_unique, by = c("locus", "seq"))
+```
+
+```{r fixing-the-missing-ones}
+# if I can't figure out exactly where/why they went missing, at least we can restore them here
+missing_ranked_hits <- missing_asvs %>%
+  left_join(., taxonomy_fixed_unique, by = c("locus", "seq")) %>%
+  group_by(locus, seq, species, genus, family, domain) %>% # fewer errors in these levels
+  mutate(taxon_percID = max(perc_id)) %>%
+  group_by(locus, seq, species, genus, family, domain, taxon_percID) %>%
+  summarise(max(taxon_percID)) %>% # take just the top hit for each taxon (for each sequence)
+  select(-`max(taxon_percID)`) %>%
+  ungroup() %>%
+  group_by(locus, seq) %>%
+  mutate(id_rank = rank(desc(taxon_percID), ties.method = "min")) %>% # rank the taxonomic hits per sequence by % id
+  mutate(top_perc = max(taxon_percID)) %>% # designate the highest % id for the best taxonomic hit in each sequence (in some, but not all cases, this is 100%)
+  group_by(locus, seq, species, genus, family, domain) %>%
+  mutate(diff = top_perc - taxon_percID) %>% # calculate the difference between the % identity of the top hit and each subsequent taxonomic hit
+  arrange(seq, diff)
+
+# here's the df of the sequences with a single top hit:
+missing_top_hits <- missing_ranked_hits %>%
+  group_by(locus, seq, id_rank) %>%
+  filter(id_rank == 1) %>% # tally the number of entries for a given sequence ranked 1
+  tally() %>%
+  filter(n == 1) %>% # keep only sequences that have a single top-ranked entry
+  select(-id_rank, -n)
+
+# only those single-top-hit sequences are eligible for testing whether there is a > 2% difference
+missing_top_hits_2perc <- missing_top_hits %>%
+  left_join(., missing_ranked_hits, by = c("locus", "seq")) %>%
+  arrange(locus, seq, id_rank) %>%
+  filter(id_rank == 2) %>% # I'm only interested in the second-top-hit at this stage. I should have removed all of the multi-top-ranked sequences, which means, all of these sequences have an entry for id_rank = 2 
+  filter(diff > 2) %>% # only the hits that have > 2% difference between the first and second hits
+  select(locus, seq) %>% 
+  unique() %>% # generate a list of sequences to then bind to the data frame with top hits
+  left_join(., missing_ranked_hits, by = c("locus", "seq")) %>%
+  filter(id_rank == 1) #%>% # take the top hit. This is the taxonomic assignment for these sequences
+  #filter(taxon_percID < 97) # confirm that all of these are assigned at a reasonable threshold 
+  
+
+# none of the ASV sequences have a single top hit with < 2% difference between hits 1 and 2
+missing_top_hits %>%
+  anti_join(., missing_top_hits_2perc)
+
+# so these are the missing ASV assignments, all of which have a genus-level assignment.
+missing_asvs_fixed <- missing_top_hits_2perc %>%
+  mutate(taxonomic_level ="genus") %>%
+  mutate(taxon = genus) %>%
+  select(-id_rank, -top_perc, -diff)
+```
+
+```{r combine-with-final-taxonomy-df}
+merged_missing_w_taxonomy_df_spp_98 <- uncollapsed_taxonomy_spp_98 %>%
+  bind_rows(missing_asvs_fixed) 
+
+merged_missing_w_taxonomy_df_spp_98 %>%
+  select(locus, seq) %>%
+  unique()
+```
+
+Now summarize those data!
+
+```{r}
+# for the consensus taxonomy:
+merged_unique_taxonomy_spp_98 <- merged_missing_w_taxonomy_df_spp_98 %>%
+  group_by(locus, seq)%>%
+  arrange(locus, seq, -taxon_percID) %>%
+  mutate(top_perc_id = max(taxon_percID)) %>%
+  select(locus, seq, taxon, taxonomic_level, top_perc_id) %>%
+  unique()
+
+# at each taxonomic level
+merged_unique_taxonomy_spp_98 %>%
+  ungroup() %>% 
+  group_by(taxonomic_level) %>%
+  tally()
+```
+species and genus?
+```{r}
+(2956+4181)/12792
+
+2956/12792
+4181/12792
+1685/12792
+986/12792
+1769/12792
+76/12792
+1139/12792
+```
+
+## modify the dataset with these additional 18 ASVs?!

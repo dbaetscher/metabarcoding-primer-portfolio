@@ -708,14 +708,14 @@ fp_combo_pal <- c(my_pal,
 
 dodge_plot3 +
   theme(
-    axis.text.x = element_text(angle = 90, hjust = 0.95),
+    axis.text.x = element_text(angle = 90, hjust = 0.95, vjust = 0.5),
     axis.title.x = element_text(margin = margin(t = 15)),
     axis.title.y = element_text(margin = margin(r = 10)),
     legend.position=c(0.82,0.7),
     legend.title = element_blank()  
     ) 
 
-#ggsave("pdf_outputs/vouchered_pool_false_positives_stackplot.pdf", height = 6, width = 8)
+ggsave("pdf_outputs/vouchered_pool_false_positives_stackplot.pdf", height = 6, width = 8)
 
 ```
 

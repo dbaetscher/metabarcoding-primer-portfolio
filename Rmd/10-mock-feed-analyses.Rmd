@@ -317,7 +317,7 @@ new_F1_df <- feeds_prop_df  %>%
 new_F1_df$percent_fishmeal <- factor(new_F1_df$percent_fishmeal, levels = c(13.32, 3.65, 1.91, 1, 0.1, 0.01))
 
 # plot color scheme
-new.pal2 <- c("seashell3", "goldenrod2", "lightsalmon", "darkorange3" ,"tomato3","sienna4")
+new.pal2 <- c("seashell3", "wheat2", "gold1", "orange2" ,"firebrick","sienna4")
 
 # plot prep
 F1plot <- ggparcoord(new_F1_df, columns = 4:6, groupColumn = "percent_fishmeal",
@@ -530,3 +530,13 @@ p + geom_point(data = mockepool, color = "black")
 ggsave("pdf_outputs/MockPools_100fishmeal_genus_decon_merged_reps_inputDNA.pdf", width = 10, height = 7)
 
 ```
+
+
+```{r which-markers-identified-sus-and-gallus}
+mockfeed_decon_uncollapsed_tax %>%
+  filter(genus %in% c("Sus", "Gallus")) %>%
+  ungroup() %>%
+  select(locus, genus) %>%
+  unique()
+```
+

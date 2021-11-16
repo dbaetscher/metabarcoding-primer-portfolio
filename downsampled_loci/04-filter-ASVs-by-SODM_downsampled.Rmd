@@ -1,0 +1,143 @@
+---
+title: "filtering based on SODM"
+output: html_notebook
+---
+
+20 May 2021
+
+The goal here is to read in the data output from `03-species-occupancy-model_downsampled.Rmd` and filter the existing data set to remove those ASVs that had <80% probabily.
+
+The taxonomy actually doesn't impact the filtering (only the assessment).
+
+
+
+```{r load-libraries-and-data}
+library(tidyverse)
+library(stringi)
+
+
+# Full dataframe
+features_w_taxonomy <- readRDS("../extdata/downsampled_loci/data/feature_df_no_eDNA_metazoa_only.rds")
+
+
+# taxonomy dataframes using a 98% identity threshold for any species-level assignments
+tax_df_spp_98 <- readRDS("../extdata/downsampled_loci/data/uncollapsed_taxonomy_spp_98.rds")
+unique_tax_spp_98 <- readRDS("../extdata/downsampled_loci/data/unique_taxonomy_spp_98.rds")
+
+# list of species in the reference mock community 
+reference_spp <- readxl::read_xlsx("../data/full_reference_spp_database_info.xlsx") %>%
+  select(2:4, 6:11)
+
+```
+
+
+Create a .txt file with a list of the file names and loci for the VRP and then read that in.
+
+The output files from the occupancy modeling analysis are located here:
+/Users/dianabaetscher/Documents/git-repos/metabarcoding-methods/Rmd_fixed_db/csv_outputs/SODM
+
+
+## Vouchered Reference DNA pool
+
+These are the data for which we're anticipating the most significant impact of data decontamination because they should have been the cleanest tissue samples of those that we included.
+
+
+```{sh, eval=FALSE}
+# create the text file 
+ls -l *VRP_ASV_SODM_100kiter.csv | awk 'BEGIN {print "locus", "file"} NR >1 && !/posinfo/ {num = $NF; gsub(/filename/, "", num); gsub(/[._].*$/, "", num);  print num, $NF}' > ../../../extdata/downsampled_loci/data/VRP-SODM-file-list.txt 
+```
+
+```{r create-dataframe-from-csvs}
+# get the names of the files
+fdf <- read.table("~/Documents/git-repos/metabarcoding-primer-portfolio/extdata/downsampled_loci/data/VRP-SODM-file-list.txt", stringsAsFactors = FALSE, header = TRUE) %>%
+  tbl_df()
+dir <- "~/Documents/git-repos/metabarcoding-primer-portfolio/downsampled_loci/csv_outputs/sodm"
+
+# cycle over them, read them and add the locus column on each.
+# at the end, bind them together.
+vrp_sodm_dataframe <- lapply(1:nrow(fdf), function(i) {
+  read_csv(paste(dir, fdf$file[i], sep = "/"), col_names = TRUE) %>%
+    mutate(locus = fdf$locus[i]) %>%
+    select(locus, everything())
+}) %>%
+  bind_rows() %>%
+  group_by(locus, seq) %>%
+  mutate(max_estimate = sum(estimate,std.error)) %>%
+  mutate(max_estimate = ifelse(max_estimate > 1, 1, max_estimate)) %>% # make 1 the maximum probability.
+  select(locus, seq, estimate, std.error, max_estimate)
+
+```
+
+So these are the ASVs that I would filter
+```{r filter-low-prob-asv}
+# with <80% probability in the SODM
+vrp_asvs_to_remove <- vrp_sodm_dataframe %>%
+  filter(max_estimate < 0.8)
+```
+155 ASVs that are removed at the 80% filtering threshold.
+
+```{r save-vouchered-ref-output-sodm-df}
+# select just the VRP samples, bind the taxonomic info for each ASV, and then bind the SODM estimates
+vrp_features_tax_w_sodm_98 <- features_w_taxonomy %>%
+  filter(str_detect(sample, "VRP")) %>%
+  left_join(., unique_tax_spp_98, by = c("locus", "seq")) %>%
+  left_join(., vrp_sodm_dataframe, by = c("locus", "seq"))
+
+# filter just >80% probability
+filtered80perc_df_spp_98 <- vrp_features_tax_w_sodm_98 %>%
+  filter(max_estimate > 0.8)
+
+# save that
+saveRDS(filtered80perc_df_spp_98, "../extdata/downsampled_loci/data/voucher_features_sodm_filtered_taxonomy_df.rds", compress = "xz")
+
+```
+
+
+
+## Full Reference DNA pool
+
+```{sh, eval=FALSE}
+ls -l *FRP_ASV_SODM_100kiter.csv | awk 'BEGIN {print "locus", "file"} NR >1 && !/posinfo/ {num = $NF; gsub(/filename/, "", num); gsub(/[._].*$/, "", num);  print num, $NF}' > ../../../extdata/downsampled_loci/data/FRP-SODM-file-list.txt 
+
+```
+
+```{r create-frp-dataframe-from-csvs}
+# get the names of the files
+fdf <- read.table("~/Documents/git-repos/metabarcoding-primer-portfolio/extdata/downsampled_loci/data/FRP-SODM-file-list.txt", stringsAsFactors = FALSE, header = TRUE) %>%
+  tbl_df()
+dir <- "~/Documents/git-repos/metabarcoding-primer-portfolio/downsampled_loci/csv_outputs/sodm"
+
+# cycle over them, read them and add the locus column on each.
+# at the end, bind them together.
+frp_sodm_dataframe <- lapply(1:nrow(fdf), function(i) {
+  read_csv(paste(dir, fdf$file[i], sep = "/"), col_names = TRUE) %>%
+    mutate(locus = fdf$locus[i]) %>%
+    select(locus, everything())
+}) %>%
+  bind_rows() %>%
+  group_by(locus, seq) %>%
+  mutate(max_estimate = sum(estimate,std.error)) %>%
+  mutate(max_estimate = ifelse(max_estimate > 1, 1, max_estimate)) %>% # make 1 the maximum probability.
+  select(locus, seq, estimate, std.error, max_estimate)
+
+```
+
+
+```{r full-ref-sodm-filtered}
+# select just the FRP samples, bind the consensus taxonomic info for each ASV, and then bind the SODM estimates
+frp_features_tax_w_sodm <- features_w_taxonomy %>%
+  filter(str_detect(sample, "FRP")) %>%
+  left_join(., unique_tax_spp_98, by = c("locus", "seq")) %>%
+  left_join(., frp_sodm_dataframe, by = c("locus", "seq"))
+            
+# keep only entries with >80% probability
+FRP_filtered80perc_df <- frp_features_tax_w_sodm %>%
+  filter(max_estimate > 0.8)
+
+# save output
+# full reference
+saveRDS(FRP_filtered80perc_df, "../extdata/downsampled_loci/data/full_reference_sodm_filtered_taxonomy_df.rds", compress = "xz")
+```
+We are less concerned about false positives in the realm of the full reference pool because we prioritized including the broadest taxonomic breadth available to us at the potential cost of samples potentially coming into contact with contaminants.
+
+

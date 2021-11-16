@@ -1,0 +1,700 @@
+---
+title: "Taxonomy: filter BLAST hits"
+output: html_notebook
+---
+
+
+Because each ASV can match many (up to hundreds) of BLAST hits at > 96% identity in the custom metazoan database, we need to filter the top BLAST hits by a series of logical rules that ensure we can obtain species-level assignments when appropriate and use lower-resolution taxonomic assignments when sequences include hits to multiple taxa.
+
+Although others have used a variety of approaches here, including selecting the single top hit with the highest % identity, or relying on external, third-party software packages (e.g., MEGAN), we can more carefully consider and understand what our results look like and the potential sources of inappropriate inference by a manual workflow...
+
+
+
+## Load data
+
+Data files are combined from output from dada2 into a single table that attaches the locus and ASV info to each set of BLAST hits.
+
+```{r load-libraries-and-data}
+library(tidyverse)
+library(stringi)
+library(readxl)
+
+# taxonomy df"
+taxa_dataframe <- readRDS("../extdata/downsampled_loci/data/taxonomy_ASV_BLAST_hits_fixed_accession.rds")
+
+# how many distinct locus/ASVs with taxonomic info from BLAST
+taxa_dataframe %>%
+  select(locus, seq) %>%
+  distinct() 
+  
+```
+12,792 unique locus/ASVs with taxonomy
+
+INSERT for review:
+
+Grab accession numbers for the target species:
+```{r}
+# list of species in the reference mock community 
+reference_spp <- readxl::read_xlsx("../data/full_reference_spp_database_info.xlsx") %>%
+  select(2:4, 6:11)
+```
+
+
+```{r}
+ref_taxa_w_accession <- taxa_dataframe %>%
+    mutate(
+      splits = strsplit(taxonomy, ";")
+    ) %>% 
+    rowwise() %>% 
+    mutate(
+      species = splits[length(splits)],
+      genus = splits[6],
+      family = splits[5],
+      order = splits[4],
+      class = splits[3],
+      phylum = splits[2],
+      domain = splits[1]
+    ) %>%
+    #select(-taxonomy, -splits) %>%
+    select(-splits) %>%
+  select(species, accession) %>%
+      right_join(., reference_spp, by = "species") %>%
+  unique()
+
+ref_accessions <- ref_taxa_w_accession %>%
+  select(species, accession) %>%
+  group_by(species) %>%
+  slice_head(n = 1) %>%
+  filter(!is.na(accession)) %>%
+  ungroup() %>%
+  select(accession) 
+  
+ref_accessions
+
+```
+
+```{r no-accession-numbers}
+ref_taxa_w_accession %>%
+  select(species, accession) %>%
+  filter(is.na(accession))
+  
+taxa_dataframe %>%
+  filter(str_detect("vannamei", taxonomy))
+```
+
+
+To combine multiple entries for the same taxon, remove accession numbers
+```{r}
+unique_merged_tax_df <- taxa_dataframe %>%
+  select(-accession) %>% # need to remove the accession number to get actual unique entries since there are multiple accession numbers for the same taxon with the same % identity
+  unique()
+
+unique_merged_tax_df %>%
+  select(locus) %>%
+  unique()
+```
+
+
+How many unique taxonomic hits
+(this includes hits to the same taxon, but at different % identity)
+```{r}
+unique_merged_tax_df %>%
+  group_by(locus, seq) %>%
+  tally() %>% 
+  ungroup() %>%
+  summarise(mean(n))
+
+```
+
+Split the taxonomic lineage now because of irregularities in the NCBI taxonomy that could cause the same species to be mistakenly counted as two different entries if the class/order/family/etc. do not match.
+```{r}
+taxonomy_split <- unique_merged_tax_df %>%
+    mutate(
+      splits = strsplit(taxonomy, ";")
+    ) %>% 
+    rowwise() %>% 
+    mutate(
+      species = splits[length(splits)],
+      genus = splits[6],
+      family = splits[5],
+      order = splits[4],
+      class = splits[3],
+      phylum = splits[2],
+      domain = splits[1]
+    ) %>%
+    #select(-taxonomy, -splits) %>%
+    select(-splits) %>%
+    group_by(locus, seq) %>%
+    select(locus, seq, species, genus, family, order, class, phylum, domain, perc_id, taxonomy)
+```
+
+## Clean up the alpha-numeric characters in the species entries
+
+The NCBI taxonomic species names are also rife with issues - specifically, all kinds of alpha-numeric characters.
+Here, I'll strip those off to retain just the clean species name.
+```{r}
+# clean-up species names that include numbers
+tmp_spp_nums <- taxonomy_split %>%
+  filter(str_detect(species, "\\d")) %>% # match any species name that includes a number
+  separate(species, into = c("a", "b","spp"), sep = "_", remove = TRUE) %>%
+  ungroup() %>%
+  mutate(spp = ifelse(str_detect(spp, "\\d"), NA, spp)) %>% # change any entry that includes a number to NA
+  mutate(spp = ifelse(b == "sp.", NA, spp))
+
+# split this into two df so that I can unite two parts in one and three parts in the other
+two_parts <- tmp_spp_nums %>%
+  filter(is.na(spp)) %>%
+  select(-spp) %>%
+  unite(species, a, b, sep = "_")
+
+# unite three parts
+three_parts <- tmp_spp_nums %>%
+  filter(!is.na(spp)) %>%
+  unite(species, a, b, spp, sep = "_")
+
+# combine the two and three part dfs
+fixed_spp_nums <- bind_rows(two_parts, three_parts)
+
+# remove the messy numeric entries from the full df and then add back in the cleaned-up entries
+spp_df_awaiting_merge <- taxonomy_split %>%
+  anti_join(fixed_spp_nums, by = c("locus", "seq", "taxonomy"))
+
+taxonomy_species_fixed_df <- spp_df_awaiting_merge %>%
+  bind_rows(fixed_spp_nums)
+
+```
+
+For species names that are actually the genus followed by "sp.", I'll mutate those to to NAs at the species-level so they don't get mistakenly assigned to species-level when they are actually genus-level hits.
+```{r}
+taxonomy_species_fixed_w_NAs <- taxonomy_species_fixed_df %>%
+  #filter(str_detect(species, "_sp\\.")) %>%
+  mutate(species = ifelse(str_detect(species, "_sp\\."), NA, species)) %>% # need to escape the .
+  mutate(genus = ifelse(str_detect(genus, "unclassified"), NA, genus)) # do a bit of clean-up too.
+
+```
+
+
+
+### Taxonomic names clean-up
+
+Clean up the single-species df: this is just a sample of the irregularities and syntax that gets pretty messy.
+```{r}
+tax_fixed2 <- taxonomy_species_fixed_w_NAs %>%
+  mutate(class = ifelse(class == "Actinopteri", "Actinopterygii", class)) %>%
+    mutate(species = ifelse(species == "Penaeus_vannamei", "Litopeneaus_vannamei", species)) %>%
+      mutate(genus = ifelse(genus == "Penaeus", "Litopeneaus", genus)) %>%
+        mutate(family = ifelse(genus == "Salminus", "Characidae", family)) %>%
+          mutate(family = ifelse(genus == "Lates", "Latidae", family))  %>%
+            mutate(family = ifelse(genus == "Scomberesox", "Scomberesocidae", family)) %>%
+              mutate(family = ifelse(genus == "Mallotus", "Osmeridae", family)) %>%
+                  mutate(species = ifelse(species == "Oreochromis_niloticus_x_Oreochromis_mossambicus", "Oreochromis_niloticus_x_mossambicus", species)) %>%
+                    mutate(species = ifelse(species == "Oreochromis_aureus_x_Oreochromis_niloticus", "Oreochromis_aureus_x_niloticus", species))
+
+```
+
+I must remove the taxonomy to keep the row_ids consistent for the "unclassified" clean-up below.
+```{r}
+# now remove the taxonomy column to get unique entries based on the cleaned-up syntax
+taxonomy_fixed_unique <- tax_fixed2 %>%
+  select(-taxonomy) %>%
+  unique()
+
+```
+
+
+### Unclassified taxonomy
+
+Which entries have "unclassified" as one of the taxonomic assignments at any level?
+
+
+```{r}
+# making a dataframe of the unclassifieds but keeping their locus and ASV information
+unclassed_df <- taxonomy_fixed_unique %>%
+  filter_all(any_vars(str_detect(., pattern = "unclassified"))) %>%
+  ungroup()
+
+# unique occurrences
+unclassifieds <- taxonomy_fixed_unique %>%
+  filter_all(any_vars(str_detect(., pattern = "unclassified"))) %>%
+  ungroup() %>%
+  select(-locus, -seq, -perc_id) %>%
+  unique() %>% 
+  arrange(family) %>%
+  rowid_to_column()
+
+
+# I'm primarily concerned with species-family level, so I'll just fix the species and move along
+tax_df_classified <- taxonomy_fixed_unique %>%
+  mutate(species = ifelse(str_detect(species, "unclassified"), NA, species))
+
+```
+
+
+
+## Collapse ASV entries based on shared species
+
+
+How many total individual ASVs associated with single taxon?
+```{r}
+single_taxon_seqs <- tax_df_classified %>%
+  ungroup() %>%
+  #filter(!is.na(species) & !is.na(genus)) %>% # only ASVs that are identified to either species or genus
+  group_by(locus, seq, species, genus, family, domain) %>% # I'm using these levels to alleviate potential errors that would cause a mismatch
+  tally() %>% # this step collapses sequences that have multiple entries for the same species
+  ungroup() %>%
+  group_by(locus, seq) %>%
+  tally() %>% # this step tallies how many unique taxonomic entries 
+  filter(n == 1) %>% # and creates a dataframe that includes only sequences with a single taxonomic entry (at > 96% identity)
+  select(-n)
+
+
+# get the total number of unique sequences
+all_seqs <- tax_df_classified %>%
+  group_by(locus, seq) %>%
+  tally() %>%
+  select(locus, seq)
+
+```
+12,792 unique locus/sequences matching taxonomy
+3,697 sequences associated with a single taxon (not necessarily species-level)
+
+Next step: 
+remove the single-taxon hits from the full dataframe and then calculate the difference in percent ID among the multiple hits in a single locus-ASV.
+
+
+# Clean-up taxonomy
+
+Here, I want to separate the sequences associated unambiguously with a single taxon from the rest.
+
+
+### Sequences matching multiple species
+
+These are divided in three categories:
+1. top matches > 2% identity than second-ranked matches
+2. top matches < 2% identity than second-ranked matches
+3. Multiple top matches with the same % identity
+
+
+Now dealing with the sequences that match multiple species:
+```{r}
+# the goal here is to create a data frame with the single top % identity entry for each sequence-taxonomic hit
+# the original data frame can include multiple entries for the same species at different % identities because of matches to different GenBank entries
+
+seq_hit_diff <- all_seqs %>%
+  anti_join(., single_taxon_seqs) %>% # remove those sequences that we determined above match a single taxon
+  left_join(tax_df_classified) %>% # bind the taxonomic information back onto the sequence names
+  ungroup() %>%
+  unique() %>% # get rid of any exact matches that are floating around
+  group_by(locus, seq, species, genus, family, domain) %>% # fewer errors in these levels
+  mutate(taxon_percID = max(perc_id)) %>%
+  group_by(locus, seq, species, genus, family, domain, taxon_percID) %>%
+  summarise(max(taxon_percID)) %>% # take just the top hit for each taxon (for each sequence)
+  select(-`max(taxon_percID)`) %>%
+  ungroup() %>%
+  group_by(locus, seq) %>%
+  mutate(id_rank = rank(desc(taxon_percID), ties.method = "min")) %>% # rank the taxonomic hits per sequence by % id
+  mutate(top_perc = max(taxon_percID)) %>% # designate the highest % id for the best taxonomic hit in each sequence (in some, but not all cases, this is 100%)
+  group_by(locus, seq, species, genus, family, domain) %>%
+  mutate(diff = top_perc - taxon_percID) %>% # calculate the difference between the % identity of the top hit and each subsequent taxonomic hit
+  arrange(seq, diff)
+
+
+# Now I have the single best entry for each species for each sequence
+# ranked and with the difference between the first and second ranked entries calculated.
+
+``` 
+
+For sequences with multiple top hits, where the difference between ranked taxa = 0, I will end up defaulting to genus- or family-level ID (or carrying the individual species info around in some capacity). I will do the same for any sequences where the difference betweeen the first and second ranked taxa is < 2%.
+
+Because of the ranking ties = minimum, I actually don't know what the numerical rank is for the second best hit when there are duplicate first best hits.
+```{r}
+# here's the df of the sequences with a single top hit:
+single_top_hit <- seq_hit_diff %>%
+  group_by(locus, seq, id_rank) %>%
+  filter(id_rank == 1) %>% # tally the number of entries for a given sequence ranked 1
+  tally() %>%
+  filter(n == 1) %>% # keep only sequences that have a single top-ranked entry
+  select(-id_rank, -n)
+
+# only those single-top-hit sequences are eligible for testing whether there is a > 2% difference
+top_hits_2perc <- single_top_hit %>%
+  left_join(., seq_hit_diff, by = c("locus", "seq")) %>%
+  arrange(locus, seq, id_rank) %>%
+  filter(id_rank == 2) %>% # I'm only interested in the second-top-hit at this stage. I should have removed all of the multi-top-ranked sequences, which means, all of these sequences have an entry for id_rank = 2 
+  filter(diff > 2) %>% # only the hits that have > 2% difference between the first and second hits
+  select(locus, seq) %>% 
+  unique() %>% # generate a list of sequences to then bind to the data frame with top hits
+  left_join(., seq_hit_diff, by = c("locus", "seq")) %>%
+  filter(id_rank == 1) #%>% # take the top hit. This is the taxonomic assignment for these sequences
+  #filter(taxon_percID < 97) # confirm that all of these are assigned at a reasonable threshold 
+  
+
+# which sequences have a single top hit but < 2% difference between hits 1 and 2?
+top_hits_no2perc <- single_top_hit %>%
+  anti_join(., top_hits_2perc)
+
+# by definition, the hits that are NA for species cannot be species-level hits.
+# I'll come back to these to figure out the appropriate level when I rejoin the rest of the the taxonomy
+top_not_spp_hits <- top_hits_2perc %>% 
+  filter(is.na(species))
+
+# remove those from the top species hits
+top_spp_2perc <- top_hits_2perc %>%
+  anti_join(., top_not_spp_hits) 
+
+top_hits_no2perc
+```
+
+
+```{r}
+# These locus-seqs we can attribute to species based on our 2% difference in % identity
+top_spp_2perc
+```
+There are an additional 571 ASVs that give us species-level id when considering the 2% cut-off.
+
+
+## Single-species hit data frame
+Combine all single-species assignments in a dataframe:
+```{r}
+# get the df info for the seqs that unambiguously match a single species
+single_spp_data <- single_taxon_seqs %>%
+  left_join(., tax_df_classified) %>%
+  group_by(locus, seq, species, genus, family, domain) %>% 
+  mutate(taxon_percID = max(perc_id)) %>%
+  top_n(1, perc_id)
+
+# some of these matches are at < 97%, but I modify the code farther down to include those at the genus-level instead
+
+# and the df info for the seqs where the top spp hit is > 2% higher than the next
+single_top_hit_data <- top_spp_2perc %>% # no species-level NAs in this df
+  left_join(., tax_df_classified) %>%
+  filter(perc_id == taxon_percID) %>%
+  select(locus, seq, species, genus, family, order, class, phylum, domain, perc_id, taxon_percID)
+
+single_spp_data %>% filter(is.na(species))
+
+```      
+```{r}
+# combine those in a single df
+single_species_combined_df <- bind_rows(single_spp_data, single_top_hit_data) %>%
+  filter(!is.na(species)) %>%
+  mutate(taxon = species) %>%
+  mutate(taxonomic_level = "species") %>%
+  select(-perc_id)
+  
+```
+
+
+```{r}
+# remove those entries from the dataframe that are actually not identified to species (because of NAs)
+single_taxa_not_spp_df <- bind_rows(single_spp_data, single_top_hit_data) %>%
+  filter(is.na(species)) %>%
+  mutate(taxon = ifelse(!is.na(genus), genus, family)) %>%
+    mutate(taxon = ifelse(is.na(family), order, taxon)) %>%
+  mutate(taxonomic_level = ifelse(is.na(genus), "family", "genus")) %>%
+    mutate(taxonomic_level = ifelse(is.na(family), "order", taxonomic_level)) %>%
+  select(-perc_id)
+  
+single_taxa_not_spp_df
+```
+
+
+[I think all of this is no irrelevant - not 100% sure yet though]
+Now deal with those pesky NAs that were the top-hit or the unambiguous BLAST hit from above.
+```{r}
+# and I also have the NA species that were the top hit
+# here is the dataframe of the 18 sequences that were the top hits, but not at species-level because of poor syntax, etc.
+  # top_not_spp_hits_full_df <- top_not_spp_hits %>%
+  # mutate(taxonomic_level = ifelse(!is.na(species), "species", "genus")) %>%
+  # mutate(taxon = ifelse(taxonomic_level == "genus", genus, species)) %>%
+  # select(-top_perc) %>%
+  # left_join(., tax_df_classified) %>%
+  # filter(perc_id == taxon_percID) %>%
+  # select(locus, seq, species, genus, family, order, class, phylum, domain, taxon_percID, taxon, taxonomic_level)
+
+
+```
+
+Now combine that with the species-level single-hit dataframe
+```{r}
+# this combines those ASVs that could be collapsed down to species because of the 2% gap in percent identity and the unambiguous hits at any taxonomic level (not just species)
+single_hit_full_df <- bind_rows(single_taxa_not_spp_df, single_species_combined_df)
+
+```
+There are 4,271 of those and the taxonomic levels appear to have manifested properly.
+
+
+```{r}
+# check to make sure that all of the above modifications worked.
+single_hit_full_df %>%
+  ungroup() %>%
+  filter(str_detect(taxon, "_sp\\."))
+
+```
+Great, that finally checked out and there are no NA species masquerading as species-level assignments. This is important for the within-locus taxonomy integration later.
+
+
+Multiple top hits
+```{r}
+# Here's the data frame with multiple top hits
+# that will be given a taxonomic assignment at the genus-level or higher
+multi_top_hit <- seq_hit_diff %>%
+  group_by(locus, seq, id_rank) %>%
+  filter(id_rank == 1) %>%
+  tally() %>%
+  filter(n > 1) %>%
+  select(-n, -id_rank) %>%
+  #select(-id_rank) %>%
+  left_join(., seq_hit_diff, by = c("locus", "seq")) %>%
+  filter(id_rank == 1)
+  
+multi_top_seqs <- multi_top_hit %>%
+  select(locus, seq) %>%
+  distinct()
+
+
+```
+
+
+## Higher-rank taxonomy
+
+For those sequences that did not match exact taxonomic lineage to the species-level, we need to test whether they actually CAN be assigned at the species-level, or are genus-level or family-level (or higher) matches.
+
+Which sequences are those?
+I think I can treat all of these similarly - taking all taxonomic matches into account.
+```{r}
+# combine those two data frames and then tack the info back on
+multi_taxa <- bind_rows(multi_top_seqs, top_hits_no2perc) %>%
+  left_join(., seq_hit_diff) %>%
+  ungroup()
+
+# remove matches that are > 2% lower in % identity from the top hit
+top_slice_multi_taxa <- multi_taxa %>%
+  filter(diff < 2) %>%
+  left_join(., tax_df_classified) %>% # add back the other taxonomic levels
+  select(locus, seq, species, genus, family, order, class, phylum, domain, taxon_percID, id_rank, diff) %>%
+  unique()
+
+```
+
+
+
+Figuring out which taxonomic level is appropriate for the ASVs that match multiple reference sequences in BLAST
+```{r}
+# single genus
+  single_genus <- top_slice_multi_taxa %>%
+    #filter(!is.na(genus)) %>% # the ASV cannot be a genus-level match if all entries are NA for genus
+    group_by(locus, seq, genus) %>%
+    tally() %>%
+    ungroup() %>%
+    group_by(locus, seq) %>%
+    tally() %>%
+    filter(n == 1) %>% # sequences that match only a single genus
+    select(-n) %>%
+    left_join(., top_slice_multi_taxa) %>%
+    mutate(taxonomic_level = "genus") %>%
+    mutate(taxon = genus)
+
+# single family
+  single_family <- top_slice_multi_taxa %>%
+    #filter(!is.na(family)) %>%
+    anti_join(single_genus, by = c("locus", "seq")) %>%
+    group_by(locus, seq, family) %>%
+    tally() %>%
+    ungroup() %>%
+    group_by(locus, seq) %>%
+    tally() %>%
+    filter(n == 1) %>% # sequences that match only a single family
+    select(-n) %>%
+    left_join(., top_slice_multi_taxa) %>%
+    mutate(taxonomic_level = "family") %>%
+    mutate(taxon = family)
+  
+  
+  # single order
+  single_order <- top_slice_multi_taxa %>%
+    #filter(!is.na(order)) %>%
+    anti_join(single_genus, by = c("locus", "seq")) %>%
+    anti_join(single_family, by = c("locus", "seq")) %>%
+    group_by(locus, seq, order) %>%
+    tally() %>%
+    ungroup() %>%
+    group_by(locus, seq) %>%
+    tally() %>%
+    filter(n == 1) %>% # sequences that match only a single order
+    select(-n) %>%
+    left_join(., top_slice_multi_taxa) %>%
+    mutate(taxonomic_level = "order") %>%
+    mutate(taxon = order)
+  
+  # single class
+  single_class <- top_slice_multi_taxa %>%
+    #filter(!is.na(class)) %>%
+    anti_join(single_genus, by = c("locus", "seq")) %>%
+    anti_join(single_family, by = c("locus", "seq")) %>%
+    anti_join(single_order, by = c("locus", "seq")) %>%
+    group_by(locus, seq, class) %>%
+    tally() %>%
+    ungroup() %>%
+    group_by(locus, seq) %>%
+    tally() %>%
+    filter(n == 1) %>% # sequences that match only a single class
+    select(-n) %>%
+    left_join(., top_slice_multi_taxa) %>%
+    mutate(taxonomic_level = "class") %>%
+    mutate(taxon = class)
+  
+  # single phylum
+  single_phylum <- top_slice_multi_taxa %>%
+    #filter(!is.na(phylum)) %>%
+    anti_join(single_genus, by = c("locus", "seq")) %>%
+    anti_join(single_family, by = c("locus", "seq")) %>%
+    anti_join(single_order, by = c("locus", "seq")) %>%
+    anti_join(single_class, by = c("locus", "seq")) %>%
+    group_by(locus, seq, phylum) %>%
+    tally() %>%
+    ungroup() %>%
+    group_by(locus, seq) %>%
+    tally() %>%
+    filter(n == 1) %>% # sequences that match only a single phylum
+    select(-n) %>%
+    left_join(., top_slice_multi_taxa) %>%
+    mutate(taxonomic_level = "phylum") %>%
+    mutate(taxon = phylum)
+  
+  # single domain
+  single_domain <- top_slice_multi_taxa %>%
+    #filter(!is.na(domain)) %>%
+    anti_join(single_genus, by = c("locus", "seq")) %>%
+    anti_join(single_family, by = c("locus", "seq")) %>%
+    anti_join(single_order, by = c("locus", "seq")) %>%
+    anti_join(single_class, by = c("locus", "seq")) %>%
+    anti_join(single_phylum, by = c("locus", "seq")) %>%
+    group_by(locus, seq, domain) %>%
+    tally() %>%
+    ungroup() %>%
+    group_by(locus, seq) %>%
+    tally() %>%
+    filter(n == 1) %>% # sequences that match only a single phylum
+    select(-n) %>%
+    left_join(., top_slice_multi_taxa) %>%
+    mutate(taxonomic_level = "domain") %>%
+    mutate(taxon = domain)
+  
+  
+  # bind those together
+higher_rank_clean_df <- bind_rows(single_genus, single_family, single_class, single_order, single_phylum, single_domain) %>%
+    select(locus, seq, species, genus, family, order, class, phylum, domain, taxon_percID, taxon, taxonomic_level) %>%
+    unique() 
+
+```
+
+```{r bind-clean-dfs}
+# bind together the taxonomy for all levels of assignment in a single data frame
+clean_taxonomy_df <- bind_rows(single_hit_full_df, higher_rank_clean_df) %>%
+  ungroup() %>%
+  mutate(phylum = ifelse(class == "Actinopterygii", "Chordata", phylum)) %>%
+    mutate(domain = ifelse(class == "Actinopterygii", "Eukaryota", domain)) %>%
+      mutate(phylum = ifelse(class == "Insecta", "Arthropoda", phylum)) %>%
+        mutate(domain = ifelse(class == "Insecta", "Eukaryota", domain)) %>%
+          mutate(phylum = ifelse(class == "Bivalvia", "Mollusca", phylum)) %>%
+            mutate(domain = ifelse(class == "Bivalvia", "Eukaryota", domain)) %>%
+              mutate(domain = ifelse(order == "Cyclopoida_sp._sp.", "Cyclopoida_sp", domain))
+
+```
+
+
+
+```{r}
+# collapse the dataframe so that there is a single entry per ASV
+clean_taxonomy_df_unique <- clean_taxonomy_df %>%
+  group_by(locus, seq)%>%
+  arrange(locus, seq, -taxon_percID) %>%
+  mutate(top_perc_id = max(taxon_percID)) %>%
+  select(locus, seq, taxon, taxonomic_level, top_perc_id) %>%
+  unique()
+
+# how many seqs at each taxonomic level?
+clean_taxonomy_df_unique %>%
+  ungroup() %>%
+  group_by(taxonomic_level) %>%
+  tally()
+
+clean_taxonomy_df_unique %>%
+  ungroup() %>% 
+  group_by(locus) %>%
+  tally() %>%
+  arrange(desc(n))
+```
+There are 4144 species-level assignments.
+
+
+
+```{r}
+# output a complete summary of those filtered taxonomic hits
+tax_df_clean_complete <- clean_taxonomy_df %>%
+  select(locus, seq, species, genus, family, order, class, phylum, domain, taxon_percID, taxonomic_level, taxon) %>%
+  unique()
+
+```
+
+
+## Species assignments >98% identity
+
+How many of the species-level assignments are at <98% identity?
+(and should those be bumped to genus instead?)
+
+```{r}
+clean_taxonomy_df_unique %>%
+  filter(taxonomic_level == "species") %>%
+  mutate(too_low = ifelse(top_perc_id < 98, "low", "ok")) %>%
+  filter(too_low == "ok")
+
+```
+
+It seems like, in many cases, there are ASVs that match the correct taxon at both >98% identity and <98% identity, so changing the lower-threshold assignments to genus-level likely will not diminish too much resolution per locus.
+
+
+Create another set of dataframes with this set-up:
+```{r}
+# using the uncollapsed taxonomy first
+uncollapsed_taxonomy_spp_98 <- tax_df_clean_complete %>%
+  mutate(too_low = ifelse((taxonomic_level == "species" & taxon_percID < 98), "low", "ok")) %>%
+  mutate(taxon = ifelse(too_low == "low", genus, taxon)) %>%
+           mutate(taxonomic_level = ifelse(too_low == "low", "genus", taxonomic_level)) %>%
+  select(-too_low)
+
+# for the consensus taxonomy:
+unique_taxonomy_spp_98 <- uncollapsed_taxonomy_spp_98 %>%
+  group_by(locus, seq)%>%
+  arrange(locus, seq, -taxon_percID) %>%
+  mutate(top_perc_id = max(taxon_percID)) %>%
+  select(locus, seq, taxon, taxonomic_level, top_perc_id) %>%
+  unique()
+
+```
+
+
+Create summary statistics for the consensus taxonomy with that adjustment to the species-threshold:
+```{r}
+# how many seqs at each taxonomic level?
+unique_taxonomy_spp_98 %>%
+  ungroup() %>% 
+  group_by(taxonomic_level) %>%
+  tally()
+
+```
+That certainly decreased the number of species and bumped those up to genus.
+
+
+Save those taxonomy dataframes
+```{r save-output-taxonomy-df}
+# collapsed - more than a single hit per ASV
+saveRDS(uncollapsed_taxonomy_spp_98, "../extdata/downsampled_loci/data/uncollapsed_taxonomy_spp_98.rds", compress = "xz")
+# unique - only a single BLAST hit per ASV... this opts for the taxonomic level that corresponds to the filtering rules above
+saveRDS(unique_taxonomy_spp_98, "../extdata/downsampled_loci/data/unique_taxonomy_spp_98.rds", compress = "xz")
+
+```
+
+
+

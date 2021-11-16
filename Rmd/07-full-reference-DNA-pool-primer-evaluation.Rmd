@@ -701,13 +701,18 @@ loc_accum_prop_combo$tax2 <- factor(loc_accum_prop_combo$taxon_level, levels = c
 
 
 ```{r plot-accumulation-curve-taxa}
+# remove the three loci that had insufficient reads
+loc_accum_prop_combo_minus_3 <- loc_accum_prop_combo %>%
+  filter(!locus %in% c("teleo", "crust2", "16Sfish"))
+
+
 # set colors
 my_pal <- c("steelblue", "darkcyan", "darkseagreen3")
 
 # plot the accumulation curve
-loc_accum_plot <- ggplot(loc_accum_prop_combo) +
+loc_accum_plot <- ggplot(loc_accum_prop_combo_minus_3) +
   geom_point(aes(x = reorder(locus, richness), y = richness, color = tax2)) +
-  geom_line(data = loc_accum_prop_combo, aes(x = reorder(locus, richness), y = richness, color = tax2, group = tax2, linetype = tax2)) +
+  geom_line(data = loc_accum_prop_combo_minus_3, aes(x = reorder(locus, richness), y = richness, color = tax2, group = tax2, linetype = tax2)) +
   theme_bw() +
   expand_limits(y = 0) +
   xlab("Locus") + 
@@ -728,12 +733,14 @@ loc_accum_plot +
     legend.title = element_blank()
   )
 
+
 ```
+
 
 
 ```{r create-dual-panel-plot}
 # two panels for the accumulation plot
-dual_panel_df <- loc_accum_prop_combo %>%
+dual_panel_df <- loc_accum_prop_combo_minus_3 %>%
   pivot_longer(cols = 3:4, names_to = "y_axis", values_to = "value") %>%
   mutate(y_axis = ifelse(y_axis == "proportion", "prop. of identified taxa", "species richness")) %>%
   mutate(gene = ifelse(locus %in% c("fishminiA", "nsCOIFo", "shark474", "aquaF3", "aquaF2", "plankCOI", "fishcoilbc", "sharkCOImini", "minibar", "crust2"), "COI", "16S")) %>%
@@ -757,7 +764,7 @@ dual_panel_df <- loc_accum_prop_combo %>%
 
 testplot2 + facet_grid(rows = vars(y_axis), scales = "free_y") +
   theme(
-    axis.text.x = element_text(angle = 90, hjust = 0.95),
+    axis.text.x = element_text(angle = 90, hjust = 0.95, vjust = 0.5),
     axis.title.x = element_text(margin = margin(t = 10), size = 11),
     axis.title.y = element_text(margin = margin(r = 10), size = 11),
     legend.text = element_text(size = 10),
@@ -818,12 +825,16 @@ loc.summary.type <- loc.summary %>%
   mutate(category = ifelse(is.na(tally), "overall", category)) %>%
   arrange(rank == "species", desc(mean))
 
+# remove those same 3 loci again
+loc.summary.type.minus3 <- loc.summary.type %>%
+  filter(!locus %in% c("teleo", "crust2", "16Sfish"))
+
 # plot it up
-loc.plot3 <- ggplot(loc.summary.type, aes(x = reorder(loc.gene, -mean))) + 
+loc.plot3 <- ggplot(loc.summary.type.minus3, aes(x = reorder(loc.gene, -mean))) + 
   #facet_grid(rows = vars(category), scales = "free_y") + 
-      geom_point(data = subset(loc.summary.type, type == "overall"), aes(x = reorder(loc.gene, -mean), y = mean, color = rank)) +
-      geom_errorbar(data = subset(loc.summary.type, type == "overall"), aes(ymin=mean-sd, ymax=mean+sd, color = rank), width=.1) +
-  geom_bar(data = subset(loc.summary.type, category == "unique"), aes(y = tally, fill = rank), stat = "identity", alpha = 0.8) +
+      geom_point(data = subset(loc.summary.type.minus3, type == "overall"), aes(x = reorder(loc.gene, -mean), y = mean, color = rank)) +
+      geom_errorbar(data = subset(loc.summary.type.minus3, type == "overall"), aes(ymin=mean-sd, ymax=mean+sd, color = rank), width=.1) +
+  geom_bar(data = subset(loc.summary.type.minus3, category == "unique"), aes(y = tally, fill = rank), stat = "identity", alpha = 0.8) +
     theme_bw() +
   ylab("Reference taxa") +
   xlab("Locus") +
@@ -834,14 +845,14 @@ loc.plot3 <- ggplot(loc.summary.type, aes(x = reorder(loc.gene, -mean))) +
 # formatting
 loc.plot3 + 
   theme(
-  axis.text.x = element_text(angle = 90, hjust = 0.95),
+  axis.text.x = element_text(angle = 90, hjust = 0.95, vjust = 0.5),
                              legend.position = c(0.87, 0.8),
   axis.title.y = element_text(margin = margin(r = 10)),
   axis.title.x = element_text(margin = margin(t = 10)),
   legend.title = element_blank()
 )
 
-#ggsave("pdf_outputs/ref_spp_FRP_w_unique_taxa_per_locus_06192020.pdf", width = 7, height = 5)
+ggsave("pdf_outputs/ref_spp_FRP_w_unique_taxa_per_locus_May2021.pdf", width = 7, height = 5)
 ```
 
 
@@ -884,7 +895,6 @@ Does locus-length relate to taxonomic resolution?
 # cbp1 <- c("#E69F00", "#56B4E9", "#009E73","#660066",
 #            "#0072B2", "#D55E00", "#CC79A7")
 # 
-# orpink <- c("#FF9900", "#339999", "#330099", "#0066CC", "#990066")
 # 
 # length_plot_ranks <- loc_lengths %>%
 #   mutate(locus = ifelse(locus == "Shark474", "shark474", locus)) %>%
@@ -923,6 +933,10 @@ Summarize the number of reference species per gene region for Supporting Informa
 
 
 ```{r reference-database-completeness}
+# color scale
+orpink <- c("#FF9900", "#339999", "#330099", "#0066CC", "#990066")
+
+
 gene_db_plot <- reference_spp %>%
   pivot_longer(cols = 5:9, names_to = "gene", values_to = "blast_entries") %>%
   mutate(db_presence = ifelse(blast_entries > 0, 1, 0)) %>%
@@ -955,13 +969,77 @@ gene_db_plot + theme(
 #ggsave("pdf_outputs/gene_database_summary_v2.pdf", height = 12, width = 6)
 ```
 
+
+
+
 ```{r summarize-reference-data}
-reference_spp %>%
+# species-level data
+spp_df <- tax_df_clean_slim %>%
+  select(locus, species) %>%
+  filter(!is.na(species)) 
+
+
+# database entries per ref species
+ref_db_long <- reference_spp %>%
   pivot_longer(cols = 5:9, names_to = "gene", values_to = "blast_entries") %>%
   mutate(db_presence = ifelse(blast_entries > 0, 1, 0)) %>%
   select(species, gene, db_presence) %>%    
   unique() %>%
-  pivot_wider(names_from = "gene", values_from = db_presence)
+  rename(barcode = gene) %>%
+  mutate(barcode = ifelse(barcode == 16, "16S", barcode)) %>%
+    mutate(barcode = ifelse(barcode == "12s", "12S", barcode)) %>%
+    mutate(barcode = ifelse(barcode == "18s", "18S", barcode)) %>%
+  mutate(barcode = ifelse(barcode == "28s", "28S", barcode)) %>%
+  mutate(present = ifelse(db_presence == 1, "yes", "no"))
+
+# which primers pick up with ref species
+spp_locus_gene_df <- unique_df %>%
+  filter(taxonomic_level == "species") %>%
+  filter(!is.na(species)) %>%
+  select(species, locus) %>%
+  left_join(., loc_info) %>%
+  unique() %>%
+  separate(loc.gene, into = c("locus", "gene"), sep = " ") %>%
+  filter(!is.na(locus))
+
+spp_locus_gene_df$barcode <- gsub("[()]", "", spp_locus_gene_df$gene)
+
+# list of reference species, the locus that identified that species, and the barcoding gene
+spp_locus_gene_df <- spp_locus_gene_df %>%
+  select(-gene)
+
+# now take the reference data and join the locus/spp info
+spp_locus_gene_df %>%
+  full_join(., ref_db_long) %>%
+  group_by(locus, barcode) %>%
+  select(species, locus, barcode, db_presence) %>%
+  mutate(spp_not_identified = ifelse(db_presence == 1 & is.na(locus), 1, NA))
+ 
+  
+
+
+# reference_spp %>%
+#   pivot_longer(cols = 5:9, names_to = "gene", values_to = "blast_entries") %>%
+#   mutate(db_presence = ifelse(blast_entries > 0, 1, 0)) %>% # make this a binary variable
+#   select(species, gene, db_presence) %>%    
+#   unique() %>%
+#   left_join(., spp_df)
+#   #pivot_wider(names_from = "gene", values_from = db_presence)
+
+
+```
+
+
+
+```{r which-spp-missing-from-db}
+reference_spp %>%
+  filter(str_detect(species, "_sp"))
+
+reference_spp %>%
+  anti_join(spp_locus_gene_df) %>%
+  select(species) %>%
+  write.csv("~/Desktop/no-spp-ref.csv")
+
 
 ```
 
@@ -979,8 +1057,8 @@ reads_taxa <- features_taxa_df %>%
   summarise(reads_per_loc = sum(count)) %>%
   left_join(., loc.summary) %>%
   #filter(rank == "species") %>%
-  ggplot(aes(reads_per_loc, mean, color = rank)) +
-  geom_point() +
+  ggplot(aes(reads_per_loc, mean, color = rank, shape = rank)) +
+  geom_point(size = 2) +
   theme_minimal() +
   xlab("Reads per locus") +
   ylab("Reference taxa (mean per locus)") +
@@ -992,6 +1070,6 @@ reads_taxa +
     axis.title.x = element_text(margin = margin(t = 10)),
         axis.title.y = element_text(margin = margin(r = 10)))
 
-#ggsave("pdf_outputs/reads_per_locus_by_reference_taxa.pdf", width = 6, height = 4)
+#ggsave("pdf_outputs/reads_per_locus_by_reference_taxa_shapes.pdf", width = 6, height = 4)
 ```
 

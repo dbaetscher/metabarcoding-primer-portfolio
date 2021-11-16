@@ -1,0 +1,736 @@
+---
+title: "vouchered reference DNA pool: investigating false positives"
+output: html_notebook
+---
+
+The goal of the vouchered reference DNA pool was to check on false positives that arise from the lab/analysis workflow. This is a subset of the data included in the full reference DNA pool, but many of those tissue samples could easily have been exposed to contamination from other fishes at seafood markets.
+
+
+Here, my goals are to understand the various sources of contamination in the vouchered pool.
+
+I want to rule out contamination from:
+1. lab sources
+2. extraction blanks and PCRs
+3. errors in the GenBank and BOLD databases
+4. poor resolution at a particular locus
+
+
+These data are derived from the analyses in `01-taxonomy-filter-BLAST-hits.Rmd` and `09-integr-taxonomic-levels-within-loci.Rmd`.
+
+
+## Load data
+
+```{r load-libraries-and-data}
+# load libraries
+library(tidyverse)
+library(stringi)
+library(readxl)
+
+# read in data - the cleaned, filtered feature table with dissimilar replicates removed and metadata
+
+# integrated taxonomy/feature table
+loc_integr <- read_rds("../data/reference_mock_communities_within_locus_integration.rds")
+
+# meta data for group and type assignments
+meta <- read_csv("../data/jan_sample_list.csv")
+
+# list of species in the reference mock community 
+reference_spp <- readxl::read_xlsx("../data/full_reference_spp_database_info.xlsx") %>%
+  select(2:4, 6:11)
+
+# voucher reference pools
+VRP <- reference_spp %>%
+  mutate(control = "positive") %>%
+  filter(Vouchered == "yes")
+
+# SODM-filtered taxa (output list from prior analysis)
+sodm_filtered_taxa <- read_csv("../data/exploring_false_positives_sodm_06082020.csv")
+```
+
+For going back to accession numbers...
+```{r read-in-accession-data}
+feature_df <- readRDS("../data/feature_df_no_eDNA.rds")
+
+```
+
+
+Remove the loci that didn't pass dissimilarity filtering because of a lack of reads: teleo, crust2, 16Sfish
+```{r select-loci-spp}
+VRP.loc <- loc_integr %>%
+  filter(stri_detect(sample, regex = "VRP")) %>% # just the vouchered reference DNA pool samples
+  filter(!locus %in% c("teleo", "crust2", "16Sfish")) %>% # remove loci with too few reads
+  select(sample, locus, species, genus, family, taxon, taxonomic_level) %>%
+  unique() 
+
+```
+
+How many are inaccurate?
+
+Get a list of false positives to explain using extraction blanks, negative controls, and biogeography
+```{r false-positives}
+# species-level false positives
+species_level_false_positives <- VRP %>%
+  full_join(., VRP.loc, by = c("species" ,"genus","family")) %>% 
+  filter(taxonomic_level == c("species")) %>% # need to match the taxonomic level to the appropriate degree of specificity from the joining step
+  mutate(`vouchered taxa` = ifelse(is.na(control), "false", "true")) %>%
+  select(locus, `vouchered taxa`, species) %>%
+  unique() %>%
+  filter(`vouchered taxa` == "false") %>% # probably want to add back in the read counts
+  left_join(., loc_integr, by = c("locus", "species")) %>%
+  filter(str_detect(sample, "VRP")) 
+
+# genus-level
+genus_level_false_positives <- VRP %>%
+  full_join(., VRP.loc, by = c("genus","family")) %>% 
+  filter(taxonomic_level == c("species", "genus")) %>%# for genus-level matches, any better taxonomic-level (species) should be included
+  mutate(`vouchered taxa` = ifelse(is.na(control), "false", "true")) %>%
+  select(locus, `vouchered taxa`, genus) %>%
+  unique() %>%
+  filter(`vouchered taxa` == "false") %>% # probably want to add back in the read counts
+  left_join(., loc_integr, by = c("locus", "genus")) %>%
+  filter(str_detect(sample, "VRP"))
+
+# family-level
+family_level_false_positives <- VRP %>%
+  full_join(., VRP.loc, by = c("family")) %>%  # correct reference families (not necessarily correct genus/species)
+  filter(taxonomic_level == c("species", "genus", "family")) %>% # for family-level matches, any better taxonomic-level should be included
+  mutate(`vouchered taxa` = ifelse(is.na(control), "false", "true")) %>%
+  select(locus, `vouchered taxa`, family) %>%
+  unique() %>%
+  filter(`vouchered taxa` == "false") %>% # probably want to add back in the read counts
+  left_join(., loc_integr, by = c("locus", "family")) %>%
+  filter(str_detect(sample, "VRP"))
+
+```
+
+
+## Cleaning up the false positives
+
+### Filtering based on presence of those false positives in the lab
+
+
+Read in the data manually filled out
+```{r false-positive-info}
+# read in a file that was manually updated with potential sources of lab contamination
+false_positives <- read_csv("../data/voucher_pool_false_positives.csv")
+
+# take a look at how many were in the lab
+lab_contaminants <- false_positives %>%
+  filter(present_in_lab == 1)
+
+# I can remove these from the "false positives" because they might be legitimately detected.
+
+```
+
+
+Trying to get the bottom of sources of contamination.
+1. lab (other species floating around that we know of)
+2. poor resolution at that locus (should be locus-specific?) OR no reference seq for the correct taxa at that locus.
+3. other??
+```{r}
+# from the original list of false positives, how many can be accounted for easily?
+false_positives_summarized <- false_positives %>%
+  filter(present_in_lab == 0) %>% # remove those taxa that we know to be sources of contamination
+  filter(species != "Kudoa_sp.") %>% # remove the fish parasite
+  group_by(family, genus, species) %>% # how many taxa show up in multiple loci?
+  add_tally(name = "n_loci") %>%
+  arrange(desc(n_loci)) %>%
+  select(-locus, -max_reads) %>%
+  unique()# how many of these were also removed by SODM?
+
+# how many belong to the same family as one or more reference taxa?
+remaining_FP <- false_positives_summarized %>%
+  left_join(., reference_spp, by = "family") %>%
+  ungroup() %>%
+  select(species.x) %>%
+  unique() %>%
+  rename(species = species.x)
+
+family_reference_matches <- false_positives_summarized %>%
+  left_join(., reference_spp, by = "family") %>%
+  mutate(source = ifelse(!is.na(species.y), "family_match_ref_taxa", NA)) %>%
+  filter(!is.na(source)) %>%
+  ungroup() %>%
+  select(taxon, source) %>%
+  unique()
+  
+```
+
+
+At the species-level, how many of the false positives are in the correct genus of either a reference species or known lab contaminant?
+
+43 of 70 entries are in the same family as one of the reference species.
+
+What is the mean number of reads per reference taxon? And are these far outside the expected read counts?
+
+The Stephanolepis is far and away the most baffling. Is it only detected by COI genes, 16S, and 12S.
+
+```{r}
+# need the taxonomy df for the read counts
+features_w_taxonomy <- readRDS("../data/feature_df_no_eDNA_metazoa_only.rds")
+tax_df_spp_98 <- readRDS("../data/uncollapsed_taxonomy_spp_98.rds")
+
+# merge those
+merged_df <- features_w_taxonomy %>%
+  left_join(tax_df_spp_98)
+  
+# just the VRP reference taxa
+vrp_taxa_counts <- VRP %>%
+  left_join(., merged_df) %>%
+  filter(str_detect(sample, "VRP")) %>%
+  group_by(locus, sample, species) %>%
+  summarise(total_count = sum(count)) %>%
+  ungroup() 
+
+vrp_mean_cts <- vrp_taxa_counts %>%
+  group_by(locus) %>%
+  summarise(mean = mean(total_count)) %>%
+  arrange(mean)
+
+```
+Maybe another way to deal with the false positives is to remove entries that are < 1% of the mean number of reads?
+
+
+```{r remove-lab-contaminants2}
+vrp_counts_df <- VRP %>%
+  full_join(., VRP.loc, by = c("species" ,"genus","family")) %>% 
+  filter(taxonomic_level == c("species")) %>% # need to match the taxonomic level to the appropriate degree of specificity from the joining step
+  select(locus, sample, species, genus, family, control, taxon, taxonomic_level) %>%
+    anti_join(., lab_contaminants, by = c("locus", "species", "genus", "family")) %>%
+  group_by(locus, sample, control) %>% # how many false positives per replicate?
+  tally() %>%
+  ungroup() %>%
+  group_by(locus, control) %>%
+  mutate(mean_count = mean(n)) %>%
+  mutate(min_count = min(n)) %>%
+  mutate(max_count = max(n))
+  
+```
+
+
+
+## Extraction blanks and negative controls
+
+What about the false positives that are also showing up in the extraction blanks and negative controls?
+
+```{r negative-controls}
+blanks_negs <- feature_df %>% # I should swap this df to be the one with just metazoa anyway...
+  left_join(., tax_df_spp_98) %>%
+  filter(str_detect(sample, "EXB") | str_detect(sample, "NEG"))
+
+# species?
+negs <- blanks_negs %>%
+  filter(!is.na(taxon)) %>%
+  semi_join(., false_positives, by = "taxon") %>%
+  select(locus, species, genus, family, taxon) %>%
+  unique() %>% 
+  mutate(source = "negative_controls")
+```
+
+
+```{r known-lab-contaminants}
+known_contam <- lab_contaminants %>%
+  select(locus, family, species, genus, taxon) %>%
+  mutate(source = "lab_contamination") %>%
+  full_join(., negs)
+
+#these are the false positives accounted for by potential lab contamination and blanks
+known_false_pos <- false_positives %>%
+  full_join(., known_contam) %>%
+  filter(!is.na(vouchered.taxa) & !is.na(source)) 
+
+# are some of the contamination patterns consistent across loci?
+general_contam <- known_contam %>%
+  select(-locus, -taxon) %>% # remove locus
+  unique()
+
+```
+
+
+
+```{r species-level-true-false-positives}
+vrp_counts_df <- VRP %>%
+  full_join(., VRP.loc, by = c("species" ,"genus","family")) %>%
+  filter(taxonomic_level == c("species")) %>% # need to match the taxonomic level to the appropriate degree of specificity from the joining step
+  select(locus, sample, species, genus, family, control, taxon, taxonomic_level) %>%
+    anti_join(., general_contam, by = c("species", "genus", "family")) %>%
+  group_by(locus, sample, control) %>% # how many false positives per replicate?
+  add_tally() %>%
+  ungroup() %>%
+  group_by(locus, control) %>%
+  mutate(mean_count = mean(n)) %>%
+  mutate(min_count = min(n)) %>%
+  mutate(max_count = max(n)) %>%
+  select(locus, control, mean_count, min_count, max_count) %>%
+  unique() %>%
+  mutate(`vouchered taxa` = ifelse(is.na(control), "false", "true")) %>%
+  ungroup() %>%
+  select(locus, `vouchered taxa`, mean_count, min_count, max_count) %>%
+  unique()
+
+vrp_counts_df$vouch2 <- factor(vrp_counts_df$`vouchered taxa`, levels = c("true", "false"))
+
+vrp_counts_df2 <- vrp_counts_df %>%
+  complete(locus, vouch2) %>% # fill in missing data!
+  mutate(mean_count = replace_na(mean_count, 0)) %>%
+  group_by(locus) %>%
+  mutate(order = sum(mean_count))
+
+```
+
+
+```{r family-contaminants}
+contaminant_families <- general_contam %>%
+  select(family) %>%
+  unique() %>%
+  anti_join(., VRP)
+```
+
+
+```{r family-true-false-plot}
+# join the dataframe to the reference species by family
+# include all taxonomic levels up to family
+# remove the lab/known contaminants - false positives
+# calculate the number of true/false positives per replicate
+# and then take the mean/min/max numbers across replicates within a locus
+vrp_family_df <- VRP %>%
+  full_join(., VRP.loc, by = c("family")) %>%
+  filter(taxonomic_level %in% c("species", "genus", "family")) %>%
+  anti_join(., contaminant_families) %>%
+  select(locus, sample, control, family) %>%
+  unique() %>%
+  group_by(locus, sample, control) %>% # how many false positives per replicate?
+  add_tally(name = "tally_per_rep") %>%
+  ungroup() %>%
+  group_by(locus, control) %>%
+  mutate(mean_count = mean(tally_per_rep)) %>%
+  mutate(min_count = min(tally_per_rep)) %>%
+  mutate(max_count = max(tally_per_rep)) %>%
+  select(locus, control, mean_count, min_count, max_count) %>%
+  unique() %>%
+  mutate(`vouchered taxa` = ifelse(is.na(control), "false", "true")) %>%
+  ungroup() %>%
+  select(locus, `vouchered taxa`, mean_count, min_count, max_count) %>%
+  unique()
+
+# create factor levels for plotting missing categories (bars)
+vrp_family_df$vouch2 <- factor(vrp_family_df$`vouchered taxa`, levels = c("true", "false"))
+
+vrp_family_df2 <- vrp_family_df %>%
+  complete(locus, vouch2) %>% # fill in missing data!
+  mutate(mean_count = replace_na(mean_count, 0)) %>%
+  group_by(locus) %>%
+  mutate(order = sum(mean_count))
+
+```
+
+
+Do similarly for genus - first get a list of the genus contaminants
+```{r genus-contamination}
+contaminant_genera <- general_contam %>%
+  select(genus) %>%
+  unique() %>%
+  anti_join(., VRP)
+```
+
+
+```{r genus-true-false-plot}
+# join the dataframe to the reference species by genus
+# include all taxonomic levels up to family
+# remove the lab/known contaminants - false positives
+# calculate the number of true/false positives per replicate
+# and then take the mean/min/max numbers across replicates within a locus
+vrp_genus_df <- VRP %>%
+  full_join(., VRP.loc, by = c("genus", "family")) %>%
+  filter(taxonomic_level %in% c("species", "genus")) %>%
+  anti_join(., contaminant_genera) %>%
+  select(locus, sample, control, genus) %>%
+  unique() %>%
+  group_by(locus, sample, control) %>% # how many false positives per replicate?
+  add_tally(name = "tally_per_rep") %>%
+  ungroup() %>%
+  group_by(locus, control) %>%
+  mutate(mean_count = mean(tally_per_rep)) %>%
+  mutate(min_count = min(tally_per_rep)) %>%
+  mutate(max_count = max(tally_per_rep)) %>%
+  select(locus, control, mean_count, min_count, max_count) %>%
+  unique() %>%
+  mutate(`vouchered taxa` = ifelse(is.na(control), "false", "true")) %>%
+  ungroup() %>%
+  select(locus, `vouchered taxa`, mean_count, min_count, max_count) %>%
+  unique()
+
+# create factor levels for plotting missing categories (bars)
+vrp_genus_df$vouch2 <- factor(vrp_genus_df$`vouchered taxa`, levels = c("true", "false"))
+
+vrp_genus_df2 <- vrp_genus_df %>%
+  complete(locus, vouch2) %>% # fill in missing data!
+  mutate(mean_count = replace_na(mean_count, 0)) %>%
+  group_by(locus) %>%
+  mutate(order = sum(mean_count))
+```
+
+
+And for consistency, and to make sure everything is accurate, do the same for species
+```{r spp-contamination}
+contaminant_species <- general_contam %>%
+  select(species) %>%
+  unique() %>%
+  anti_join(., VRP)
+```
+
+
+```{r species-true-false-plot}
+# join the dataframe to the reference species by species
+# include just species-level taxonomic hits
+# remove the lab/known contaminants - false positives
+# calculate the number of true/false positives per replicate
+# and then take the mean/min/max numbers across replicates within a locus
+vrp_spp_df <- VRP %>%
+  full_join(., VRP.loc, by = c("species", "genus", "family")) %>%
+  filter(taxonomic_level %in% "species") %>%
+  anti_join(., contaminant_species) %>%
+  select(locus, sample, control, species) %>%
+  unique() %>%
+  group_by(locus, sample, control) %>% # how many false positives per replicate?
+  add_tally(name = "tally_per_rep") %>%
+  ungroup() %>%
+  group_by(locus, control) %>%
+  mutate(mean_count = mean(tally_per_rep)) %>%
+  mutate(min_count = min(tally_per_rep)) %>%
+  mutate(max_count = max(tally_per_rep)) %>%
+  select(locus, control, mean_count, min_count, max_count) %>%
+  unique() %>%
+  mutate(`vouchered taxa` = ifelse(is.na(control), "false", "true")) %>%
+  ungroup() %>%
+  select(locus, `vouchered taxa`, mean_count, min_count, max_count) %>%
+  unique()
+
+# create factor levels for plotting missing categories (bars)
+vrp_spp_df$vouch2 <- factor(vrp_spp_df$`vouchered taxa`, levels = c("true", "false"))
+
+vrp_spp_df2 <- vrp_spp_df %>%
+  complete(locus, vouch2) %>% # fill in missing data!
+  mutate(mean_count = replace_na(mean_count, 0)) %>%
+  group_by(locus) %>%
+  mutate(order = sum(mean_count))
+
+# combine all three ranks
+spp <- vrp_spp_df2 %>%
+  mutate(tax.rank = "species")
+
+gen <- vrp_genus_df2 %>%
+  mutate(tax.rank = "genus")
+
+fam <- vrp_family_df2 %>%
+  mutate(tax.rank = "family")
+ 
+vrp_combo_df <- bind_rows(spp, gen, fam)
+
+```
+
+
+```{r}
+# # reformat the dataframe to make the stacked barplot
+stacked_df <- vrp_combo_df %>%
+  mutate(fill = ifelse(vouch2 == "false", "false positive", tax.rank)) %>%
+  mutate(remove = ifelse(fill == "false positive" & tax.rank %in% c("genus", "family"), "yes", "no")) %>%
+  filter(remove == "no")
+
+# change the factor levels
+stacked_df$fill <- factor(stacked_df$fill, levels = c("family","genus", "species", "false positive"))
+
+```
+
+
+## More questions about false positives...
+```{r}
+ord_loc <- stacked_df %>%
+  select(locus, order)
+ 
+temp_stack <- stacked_df %>%
+  select(locus, mean_count, order, fill)
+
+# add in known lab contamination
+lab_contam_df <- known_contam %>%
+  select(locus, taxon, source) %>%
+    mutate(taxon = ifelse(taxon == "Litopeneaus_vannamei", "Litopeneaus", taxon)) %>%
+  unique() %>%
+  group_by(locus) %>%
+  add_tally(name = "mean_count") %>%
+  mutate(fill = "lab taxa") %>%
+  select(-taxon, - source)
+
+almost_df <- ord_loc %>%
+  left_join(., lab_contam_df) %>%
+  unique() %>%
+  bind_rows(., temp_stack)
+  
+almost_df$fill <- factor(almost_df$fill, levels = c("family", "genus", "species", "lab taxa", "false positive"))
+```
+
+
+
+2.	Which FP (that are not caused by known lab contamination) are shared among loci?
+
+Create a single df that traces as many of the sources as we can...
+```{r}
+lab_contam <- known_contam %>%
+  select(-locus)
+
+```
+
+The round-up: which FPs can be attributed to which sources?
+```{r}
+FP_roundup <- false_positives %>%
+  left_join(., family_reference_matches) %>%
+  left_join(., lab_contam, by = "taxon") %>%
+  mutate(source = ifelse(is.na(source.x), source.y, source.x)) %>%
+  select(source, taxon, locus) %>%
+  mutate(source = ifelse(source == "negative_controls", "lab_contamination", source)) %>%
+  mutate(source = ifelse(taxon == "Kudoa", "specimen_contamination", source)) %>%
+  mutate(taxon = ifelse(taxon == "Cololabis_saira", "Cololabis", taxon)) %>%
+  unique() %>%
+  group_by(locus, source) %>%
+  add_tally(name = "n_FP") %>%
+  left_join(., false_positives) %>%
+  select(source, locus, species, genus, family, taxon)
+
+```
+
+The SODM filtered taxa were already removed, so I can add those back on for the relevant loci:
+```{r}
+roundup2 <- FP_roundup %>% 
+  bind_rows(sodm_filtered_taxa) %>%
+  mutate(taxon = ifelse(is.na(species), genus, species)) %>%
+  mutate(taxon = ifelse(is.na(genus), family, taxon)) %>%
+  mutate(taxon = ifelse(is.na(taxon), "Cololabis_sp.", taxon)) %>%
+  select(source, locus, taxon) %>%
+  group_by(locus, source) %>%
+  add_tally(name = "n_FP") %>%
+  select(source, locus, n_FP) %>%
+  unique() %>%
+  ungroup() %>%
+  mutate(source = ifelse(is.na(source), "other", source))
+
+loc_ordered_uniq <- stacked_df %>%
+  filter(fill == "genus") %>% # select this arbitrarily to get a single order-set
+  select(locus, order) 
+
+```
+
+
+```{r}
+# remake this with the NA loci as well.
+almost_df$fill <- as.character(almost_df$fill)
+
+```
+
+
+## Species-level false positives
+
+```{r}
+# select just the species-level false positives, since those are the ones that will be used for the biogeographic inference (in the feeds)
+FP_lab_taxa_w_family_matches <- false_positives %>%
+  filter(taxonomic_level == "species") %>%
+  mutate(fill = ifelse(present_in_lab == 1, "lab taxa (sp)", NA)) %>%
+  select(locus, species, fill) %>%
+  left_join(., family_reference_matches, by = c("species" = "taxon")) %>% # add in putative lab contamination
+  mutate(fill = ifelse(is.na(fill) & source == "family_match_ref_taxa", "lab taxa (genus or family)", fill))
+
+```
+
+
+```{r taxa-removed-sodm}
+# summarize species-level occupancy model removals
+sodm_spp_for_joining <- sodm_filtered_taxa %>%
+  select(locus, species) %>%
+  filter(!is.na(species)) %>%
+  mutate(fill = "occupancy model")
+
+false_positives_accounting <- FP_lab_taxa_w_family_matches %>%
+  select(-source) %>%
+  mutate(fill = ifelse(is.na(fill), "other", fill)) %>%
+  bind_rows(., sodm_spp_for_joining) %>%
+  group_by(locus, fill) %>%
+  tally(name = "sp_count")
+
+
+combined_voucher_FP_df <- almost_df %>%
+  filter(fill %in% c("species", "genus", "family")) %>%
+  select(-order) %>%
+  rename(sp_count = mean_count) %>%
+  bind_rows(., false_positives_accounting) %>%
+  left_join(loc_ordered_uniq) %>%
+  ungroup() %>%
+  mutate(fill = ifelse(fill == "species", "species (voucher)", fill)) %>%
+    mutate(fill = ifelse(fill == "genus", "genus (voucher)", fill)) %>%
+    mutate(fill = ifelse(fill == "family", "family (voucher)", fill))
+  
+  
+# set the factor levels for the fill order
+combined_voucher_FP_df$fill <- factor(combined_voucher_FP_df$fill, levels = c("species (voucher)", "genus (voucher)", "family (voucher)", "lab taxa (sp)", "lab taxa (genus or family)",  "occupancy model", "other"))
+
+```
+
+keep the species info:
+```{r}
+FP_spp_w_taxon_names <- false_positives %>%
+  filter(taxonomic_level == "species") %>%
+  mutate(fill = ifelse(present_in_lab == 1, "lab taxa (sp)", NA)) %>%
+  left_join(., family_reference_matches, by = c("species" = "taxon")) %>% # add in putative lab contamination
+  mutate(fill = ifelse(is.na(fill) & source == "family_match_ref_taxa", "lab taxa (genus or family)", fill)) %>%
+  select(locus, species, fill)
+
+```
+
+```{r sodm-taxa-genus-family}
+# add in the genus and family level SODM taxa to the species
+sodm_spp <- sodm_filtered_taxa %>%
+  mutate(fill = source) %>%
+  mutate(taxonomic_level = ifelse(is.na(species), "genus", "species")) %>%
+    mutate(taxonomic_level = ifelse(is.na(genus), "family", taxonomic_level)) %>%
+  filter(taxonomic_level == "species") %>%
+  select(locus, species, fill)
+
+```
+
+
+There are 5 false positives at the species level that cannot be accounted for by lab contamination etc.
+Uranoscopus_japonicus	(Japanese stargazer) = indo-Pacific distribution
+Thalassoma_quinquevittatum	(Pinkface wrasse) = Pacific
+Muraenesox_cinereus (Daggertooth pike conger) = indo-Pacific to Red Sea
+Gavialiceps_taiwanensis (pike conger) = indo-Pacific
+Chimaera_phantasma (Silver chimaera, ghost shark) = W. Pacific
+
+
+## Gains from data decontamination
+
+Here we want to compare the decontaminated and not-decontaminated data to determine what the gains were from the species occupancy modeling and dissimilarity steps.
+
+```{r false-positives-not-decontaminated}
+# read in the data for the vouchered reference samples without the decontamination steps
+no_decontam <- read_rds("../data/within_locus_integration_no_decontamination.rds") %>%
+  filter(str_detect(sample, "VRP"))
+
+# how many false positives are present in the non-decontaminated data?
+no_decontam_false_pos <- no_decontam %>%
+  filter(!locus %in% c("teleo", "crust2", "16Sfish")) %>% # ignore the 3 loci with too few reads
+  select(sample, locus, species, genus, family, taxon, taxonomic_level) %>%
+  unique() %>%
+  filter(taxonomic_level == "species") %>%
+  full_join(reference_spp) %>%
+  left_join(lab_contam) %>%
+  select(locus, species, source, Vouchered) %>%
+  mutate(source = ifelse(Vouchered == "no", "lab_contamination", source)) %>%
+  filter(is.na(Vouchered)) %>%
+  group_by(locus) %>%
+  unique()
+
+
+# designate whether the taxa identified in the vouchered reference pool samples was lab contamination
+decon_false_pos <- loc_integr %>%
+  filter(str_detect(sample, "VRP")) %>% # only vouchered reference pool samples
+  filter(!locus %in% c("teleo", "crust2", "16Sfish")) %>% # ignore the 3 loci with too few reads
+  select(sample, locus, species, genus, family, taxon, taxonomic_level) %>%
+  unique() %>%
+  filter(taxonomic_level == "species") %>% # only species-level
+  full_join(reference_spp) %>% # which were reference species?
+  left_join(lab_contam) %>% # which were lab contamination?
+  select(locus, species, source, Vouchered) %>%
+  mutate(source = ifelse(Vouchered == "no", "lab_contamination", source)) %>% # if the ref species that were not vouchered are present, then they are lab contamination
+  filter(is.na(Vouchered)) %>%
+  group_by(locus) %>%
+  unique()
+
+
+# how many false positives were removed by decontamination?
+anti_join(no_decontam_false_pos, decon_false_pos)
+
+```
+There are 16 false positives (species) that were removed by the decontamination process... both sodm and dissimilarity.
+
+
+
+```{r prep-data-for-plot}
+# add the taxa that were removed by dissimilarity
+# subtract the sodm to get the dissimilarity benefit.
+dissimilarity_FPs <- anti_join(no_decontam_false_pos, decon_false_pos) %>%
+  left_join(., sodm_spp_for_joining) %>%
+  mutate(fill = ifelse(is.na(fill), "dissimilarity", fill)) %>% # if it wasn't removed by the sodm, it was the   dissimilarity filter
+  filter(fill == "dissimilarity") %>%
+  select(-Vouchered)
+
+# add in SODM and tally 
+false_positives_accounting2 <- FP_lab_taxa_w_family_matches %>%
+  select(-source) %>%
+  mutate(fill = ifelse(is.na(fill), "other", fill)) %>%
+  bind_rows(., sodm_spp_for_joining) %>%
+  bind_rows(., dissimilarity_FPs) %>%
+  group_by(locus, fill) %>%
+  tally(name = "sp_count") 
+
+
+combined_voucher_FP_df <- almost_df %>%
+  filter(fill %in% c("species", "genus", "family")) %>%
+  select(-order) %>%
+  rename(sp_count = mean_count) %>%
+  bind_rows(., false_positives_accounting2) %>%
+  left_join(loc_ordered_uniq) %>%
+  ungroup() %>%
+  mutate(fill = ifelse(fill == "species", "species (voucher)", fill)) %>%
+    mutate(fill = ifelse(fill == "genus", "genus (voucher)", fill)) %>%
+    mutate(fill = ifelse(fill == "family", "family (voucher)", fill)) %>%
+   mutate(gene = ifelse(locus %in% c("fishminiA", "nsCOIFo", "shark474", "aquaF3", "aquaF2", "plankCOI", "fishcoilbc", "sharkCOImini", "minibar", "crust2"), "COI", "16S")) %>%
+  mutate(gene = ifelse(locus %in% c("mifish", "teleo"), "12S", gene)) %>%
+    mutate(gene = ifelse(str_detect(locus, "18S"), "18S", gene)) %>%
+      mutate(gene = ifelse(str_detect(locus, "28S"), "28S", gene)) %>%
+  mutate(gene = paste0("(",gene,")")) %>%
+  unite(loc.gene, locus, gene, sep = " ", remove = F)
+  
+  
+# set the factor levels for the fill order
+combined_voucher_FP_df$fill <- factor(combined_voucher_FP_df$fill, levels = c("species (voucher)", "genus (voucher)", "family (voucher)", "lab taxa (sp)", "lab taxa (genus or family)",  "occupancy model", "dissimilarity",  "other"))
+
+# now set the colors for those levels
+my_pal <- c("steelblue", "darkcyan", "darkseagreen3")
+fp_combo_pal <- c(my_pal, 
+                  "lemonchiffon1", "lightgoldenrod",  "goldenrod", "darkorange4", "gray45")
+
+# plot that up
+  dodge_plot3 <- combined_voucher_FP_df %>%
+  ggplot(aes(x = reorder(loc.gene,-order), y = sp_count, fill = fill)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_bw() +
+  xlab("Locus") +
+  ylab("Taxa identified") +
+  scale_fill_manual(values = c(fp_combo_pal)) 
+
+dodge_plot3 +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.95),
+    axis.title.x = element_text(margin = margin(t = 15)),
+    axis.title.y = element_text(margin = margin(r = 10)),
+    legend.position=c(0.82,0.7),
+    legend.title = element_blank()  
+    ) 
+
+#ggsave("pdf_outputs/vouchered_pool_false_positives_stackplot.pdf", height = 6, width = 8)
+
+```
+
+
+### Remaining false positives, per locus
+
+```{r remaining-false-positives}
+# calculate the mean remaining false positives
+combined_voucher_FP_df %>%
+  filter(fill %in% c("lab taxa (sp)", "lab taxa (genus or family)", "other")) %>%
+  select(locus, sp_count, fill) %>%
+  #filter(fill == "other") %>%
+  group_by(locus) %>%
+  summarise(tot_FP = sum(sp_count)) %>% # combining all lab taxa and false positives
+  arrange(desc(tot_FP)) %>%
+  summarise(mean(tot_FP))
+```
+

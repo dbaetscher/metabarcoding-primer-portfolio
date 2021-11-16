@@ -1,0 +1,186 @@
+---
+title: "Filtering ASVs based on dissimilarity across sample replicates"
+output: html_notebook
+---
+20 May 2021
+
+Here we'll use the Bray-Curtis index to identify sample replicates (within each locus) that are more dissimilar than similar to the other replicates. Dissimilarity can be an indication of an issue (contamination, etc.) with a particular replicate.
+
+This uses the output from the species-occupancy detection modeling in `03-species-occupancy-model.Rmd`
+The occupancy modeling uses the ASVs (not taxonomy) and I'll use a similar approach here with the Bray-Curtis and NMDS analyses.
+
+
+## Process
+
+The process is a bit cumbersome because it requires looking at each sample/locus/replicate for the full reference DNA pool and vouchered reference pool.
+
+The process for looking at the dissimilarity among replicates is to:
+1. Read in data that has been cleaned up using the occupancy modeling
+2. Create a community matrix (per locus)
+3. Standardize data across replicates (fct decostand)
+4. Generate Bray-Curtis distances (fct vegdist)
+   4a. Are any replicates more dissimilar than similar? 
+5. Generate NMDS plots from distance matrix (fct metaMDS)
+
+6. Read in list
+
+
+
+## Outputs
+
+Based on the NMDS plots and Bray-Curtis dissimilarity index, I generated a list of samples to remove:
+
+`../data/reference_pool_dissimilarity_samples_to_remove.csv`
+
+The data that were used to generate that list are output .csv files from the Bray-Curtis function, implemented below.
+
+In addition, three loci had insufficient data across all 18 samples in both the vouchered and full reference pools to be included in these analyses and will be dropped from further analyses:
+
+16Sfish
+teleo
+crust2
+
+
+```{r load-functions}
+source("../R/metabarcoding-funcs.R")
+```
+
+
+
+```{r load-libs-and-data}
+library(tidyverse)
+library(stringi)
+library(vegan)
+library(reshape2)
+library(textshape)
+library(rlist)
+
+
+# output from the ASV filtering based on the SODM for 
+# vouchered ref
+vrp_sodm_filtered_df <- readRDS("../extdata/downsampled_loci/data/voucher_features_sodm_filtered_taxonomy_df.rds")
+
+# full reference
+frp_sodm_filtered_df <- readRDS("../extdata/downsampled_loci/data/full_reference_sodm_filtered_taxonomy_df.rds")
+
+```
+
+
+I have wrapped the Bray-Curis and NMDS up into a function called `bray_nmds_complete` which outputs a .csv file with the replicates that are > 0.49 dissimilar and generates an NMDS plot.
+
+
+I'll use that function with an lappy and the list of loci, since each locus will be analyzed separately. 
+
+To cycle over a list of the loci...
+```{r}
+# grab the names of the loci from the full dataframe
+locs <- frp_sodm_filtered_df %>%
+  select(locus) %>%
+  unique() %>%
+  as.list()
+
+# turn that into a list that could be cycled over
+loc_list <- locs$locus
+
+# make a separate list for the VRP samples
+locs19 <- frp_sodm_filtered_df %>%
+  select(locus) %>%
+  unique() %>%
+  filter(!locus %in% c("crust2", "16Sfish", "teleo")) %>%
+  as.list()
+
+# turn that into a list that could be cycled over
+loc_list19 <- locs19$locus
+
+```
+
+
+
+## Full Reference dataframe
+
+```{r apply-bray-fct-over-full-reference-pool}
+# cycle over the list of loci for the full reference pool sample replicates
+# using the bray-curtis function to test for dissimilarity
+lapply(loc_list19, bray_nmds_complete, sodm_filtered_df = frp_sodm_filtered_df, sample = "FRP")
+```
+
+## Vouchered Reference dataframe
+
+Here, I'm using a loc list that doesn't include 16Sfish and crust2 because they have too few samples to include. 
+
+apparently, also 18SSSU3
+
+```{r}
+# make a separate list for the VRP samples
+locs18 <- frp_sodm_filtered_df %>%
+  select(locus) %>%
+  unique() %>%
+  filter(!locus %in% c("crust2", "16Sfish", "teleo", "18SSSU3")) %>%
+  as.list()
+
+# turn that into a list that could be cycled over
+loc_list18 <- locs18$locus
+
+```
+
+
+```{r apply-bray-filter-vouchered-samples}
+# cycle over the list of loci for the full reference pool sample replicates
+# using the bray-curtis function to test for dissimilarity
+# two of the loci were removed because they had too little data remaining after the sodm filter step
+lapply(loc_list19, simple.bray, sodm_filtered_df = vrp_sodm_filtered_df, sample = "VRP")
+
+```
+
+
+
+## Remove dissimilar replicates
+
+Based on the output from `04-filter-ASV-by-SODM.Rmd`, I now want to filter the dataset to remove replicates for loci that have high dissimilarity values, listed here: `extdata/downsampled_loci/data/samples_to_remove_downsampled.csv`.
+
+
+```{r bind-reference-dataframes}
+# bind together the vouchered and full reference SODM dataframes
+reference_df_sodm_filtered <- vrp_sodm_filtered_df %>% bind_rows(frp_sodm_filtered_df)
+
+```
+
+
+A clean, non-redundant version of the reference sample dataframe
+```{r}
+ref_sodm_filtered_unique <- reference_df_sodm_filtered %>% 
+  select(locus, seq, sample, count) %>%
+  unique() %>% # if there are multiple entries with different counts, we want to collapse those reads
+  group_by(locus, seq, sample) %>%
+  mutate(total_reads = sum(count)) %>%
+  select(-count) %>%
+  rename(count = total_reads)
+
+```
+
+So that is the dataframe from which we want to remove this particular list of locus-samples
+```{r dissimilar-samples-to-remove}
+# read in the list of samples to remove
+tossers <- read_csv("../extdata/downsampled_loci/data/samples_to_remove_downsampled.csv")
+
+```
+
+It turns out that an anti-join is all I need for this filtering step.
+```{r}
+ref_sodm_bray_filtered_unique <- ref_sodm_filtered_unique %>%
+  anti_join(., tossers, by = c("locus", "sample")) 
+
+```
+
+Okay, so that is the dataset that I can work through the assessment analyses with, beginning with summary statistics, then adding in the taxonomy and assessing true/false positives in the vouchered samples and breadth of taxonomic coverage in the full reference pool.
+
+
+## Save filtered dataframe
+
+Save the filtered feature table output from occupancy modeling and dissimilarity
+```{r}
+# save this version of the feature table to combine with taxonomy for locus-integrated taxonomy
+ref_sodm_bray_filtered_unique %>%
+  saveRDS("../extdata/downsampled_loci/data/feature_table_sodm_bray_filtered.rds", compress = "xz")
+
+```

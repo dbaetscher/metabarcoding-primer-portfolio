@@ -1,0 +1,293 @@
+---
+title: "Species occupany detection modeling"
+output: html_notebook
+---
+
+Initial data decontamination using species occupancy detection modeling on a per-sample, per-locus basis. This is based on Ryan Kelly's work/GitHub tutorial.
+
+The input is a table of counts per sample/locus that only includes the ASVs with taxonomic hits in the BLAST database (since we wouldn't be drawing inference from the sequences without taxonomic info).
+
+The input dataframe is `../data/feature_df_no_eDNA_metazoa_only.rds` and is generated in `01-updated-background-Oct-2020.Rmd`.
+
+Mostly, we are interested in the vouchered reference DNA pool, since the full reference DNA pool and experimental feed mixtures almost certainly included contamination from samples obtained from seafood markets.
+
+
+Most of the action is now wrapped up in a function called `sodm.by.locus` which outputs files to "csv_outputs/" in the current working directory.
+
+
+```{r load-packages}
+# function source
+source("../R/metabarcoding-funcs.R")
+
+library(tidyverse)
+library(stringi)
+library(here)
+library(rstan)
+library(shinystan)
+library(bayesplot)
+library(broom)
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+set.seed(108)
+setwd(here())
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+
+
+## The model
+
+
+Two Stan model functions for two steps in this process:
+
+From Ryan Kelly's github page:
+
+## Estimating Posteriors in Stan 
+
+Stan actually does its work in C++, so it has to write out a program to a file (outside of **R**) and compile it to run at a deeper level of your computer's architecture. This takes a little while the first time you compile a given set of Stan code, but only needs to be redone if you change the Stan code.  
+
+
+```{r}
+##Stan Model
+modelText <- "data{/////////////////////////////////////////////////////////////////////
+    int<lower=1> S;    // number of sites or samples (nrow)
+    int<lower=1> K[S];   // number of replicates per site (ncol)
+    int<lower=0> N[S]; // detected or not at that site/replicate
+    int z[S];   
+}
+parameters{/////////////////////////////////////////////////////////////////////
+    real<lower=0,upper=1> psi;  //commonness parameter
+    real<lower=0,upper=1> p11; //true positive detection rate
+    real<lower=0,upper=1> p10; //false positive detection rate
+}
+transformed parameters{/////////////////////////////////////////////////////////////////////
+}
+model{/////////////////////////////////////////////////////////////////////
+  real p[S];
+  
+    for (i in 1:S){
+			z[i] ~ bernoulli(psi);
+			p[i] = z[i]*p11 + (1-z[i])*p10;
+			N[i] ~ binomial(K[i], p[i]);
+	}; 
+  
+  //priors
+  psi ~ beta(5,5); 
+  p11 ~ beta(5,5); 
+  p10 ~ beta(1,50);
+}
+generated quantities{
+  real<lower=0,upper=1> Occupancy_prob[S];    //after inferring parameters above, now calculate occupancy probability for each observation. Equation from Lahoz-Monfort et al. 2015
+  for (i in 1:S){
+       Occupancy_prob[i]  = (psi*(p11^N[i])*(1-p11)^(K[i]-N[i])) 
+       / ((psi*(p11^N[i])*(1-p11)^(K[i]-N[i])) 
+          + (((1-psi)*(p10^N[i]))*((1-p10)^(K[i]-N[i])))
+         );
+      }
+}
+"
+write.table(modelText, "Stan_SOM_demo.stan", row.names = F, quote = F, col.names = F)
+```
+
+
+
+And we can then explore the posterior occupancy probability for all possible outcomes of 10 trials, given these parameters:
+
+```{r}
+modelText <- "data{/////////////////////////////////////////////////////////////////////
+    int<lower=1> S;    // number of sites or samples (nrow)
+    int<lower=1> K[S];   // number of replicates per site (ncol)
+    int<lower=0> N[S]; // detected or not at that site/replicate
+    int z[S];   
+}
+parameters{/////////////////////////////////////////////////////////////////////
+    real<lower=0,upper=1> psi;  //commonness parameter
+    real<lower=0,upper=1> p11; //true positive detection rate
+    real<lower=0,upper=1> p10; //false positive detection rate
+}
+transformed parameters{/////////////////////////////////////////////////////////////////////
+}
+model{/////////////////////////////////////////////////////////////////////
+  real p[S];
+  
+    for (i in 1:S){
+			z[i] ~ bernoulli(psi);
+			p[i] = z[i]*p11 + (1-z[i])*p10;
+			N[i] ~ binomial(K[i], p[i]);
+	}; 
+  
+  //priors
+  psi ~ beta(5,5); 
+  p11 ~ beta(5,5); 
+  p10 ~ beta(1,50);
+}
+generated quantities{
+    real<lower=0,upper=1> Occupancy_prob[11];    //after inferring parameters above, now calculate occupancy probability for each observation. Equation from Lahoz-Monfort et al. 2015
+  for (i in 0:10){
+       Occupancy_prob[i+1]  = (psi*(p11^i)*(1-p11)^(10-i)) 
+       / ((psi*(p11^i)*(1-p11)^(10-i)) 
+          + (((1-psi)*(p10^i))*((1-p10)^(10-i)))
+         );
+      }
+}
+"
+write.table(modelText, "Stan_SOM_allPossibilities.stan", row.names = F, quote = F, col.names = F)
+
+```
+
+
+
+## The data
+
+The dataframe that just includes ASVs associated with taxonomy retained
+```{r load-data}
+features_w_taxonomy <- readRDS("../extdata/downsampled_loci/data/feature_df_no_eDNA_metazoa_only.rds")
+
+```
+
+
+Cycle over a list of the loci for a given site.
+
+```{r make-locus-list}
+# all 22 loci
+locs <- features_w_taxonomy %>%
+  select(locus) %>%
+  unique() %>%
+  as.list()
+
+# turn that into a list that could be cycled over
+loc_list <- locs$locus
+
+```
+
+
+Cycle over the loci and generate csv outputs that I can then filter based on occupancy probabilties.
+```{r vouchered-reference-reps}
+# lapply over the list of 22 loci 
+# the site, dataframe, and number of replicates are consistent for now
+lapply(loc_list, sodm.by.locus, feature_table = features_w_taxonomy, site = "VRP", n_replicates = 9)
+
+```
+
+```{r}
+loc_list
+```
+
+
+Because we only really could control for false positives (to some degree) in the vouchered reference pool, my expectation is that those samples will have greater separation between true and false positives, and thus, perform better using this framework.
+
+
+
+## testing the number of iterations:
+
+I have always seen an output error message from this analysis that says:
+Tail Effective Samples Size (ESS) is too low, indicating posterior variances and tail quantiles may be unreliable. Running the chains for more iterations may help. See http://mc-stan.org/misc/warnings.html#tail-ess
+
+Although I bumped up the number of iterations from 5K to 10K, I never fully investigated if I could get the warning message to go away with a sufficient number of iterations.
+
+Before I move forward with these data, let's see if 50K or 100K improves the estimate or if it is a sample size problem that I'm not going to be able to overcome by more iterations.
+
+Based on testing a few different iteration options, I'm sticking with 100k.
+
+Given the uncertainty of the tail probabilities, it seems best to take that into consideration when removing ASVs as putative false positives.
+
+So, if the occupancy estimate + the error is <80%, I will say that is sufficient evidence to remove that ASV.
+
+
+
+## Running the SODM with full reference pool samples
+
+Full reference pool - all 22 loci
+```{r full-reference-reps}
+# lapply over the list of 22 loci
+lapply(loc_list, sodm.by.locus, feature_table = features_w_taxonomy, site = "FRP", n_replicates = 9)
+
+```
+
+
+
+## Mock feed data
+
+I'm using this as a step-wise experiment and only testing the mock feeds with the optimal locus combination:
+
+```{r top-four-loci}
+# make a list of just the four loci
+four_locs <- c("mifish", "nsCOIFo", "fishminiA", "cep")
+
+```
+
+Now loop over those four for the feeds and mock feed pools
+```{r mock-equal-pool-four-loci}
+# lapply over the four loci for the mock equal pool replicates
+lapply(four_locs, sodm.by.locus, feature_table = features_w_taxonomy, site = "MEP", n_replicates = 9)
+
+```
+
+
+Now loop over those four for the feeds and mock feed pools
+```{r mock-feed-pool-four-loci}
+# lapply over the replicates for the mock feed pool and the top four loci
+lapply(four_locs, sodm.by.locus, feature_table = features_w_taxonomy, site = "MFP", n_replicates = 9)
+
+```
+
+
+```{r 0%-fishmeal-filler2}
+# lapply over the four loci for filler2 and 0% fishmeal replicates
+lapply(four_locs, sodm.by.locus, feature_table = features_w_taxonomy, site = "F2_0", n_replicates = 6)
+
+```
+
+
+```{r 0%-fishmeal-filler1}
+# lapply over the four loci for filler1 and 0% fishmeal replicates
+lapply(four_locs, sodm.by.locus, feature_table = features_w_taxonomy, site = "F1_0", n_replicates = 6)
+
+```
+
+
+```{r 100%-fishmeal-no-filler}
+# lapply over the four loci for 100% fishmeal replicates
+lapply(four_locs, sodm.by.locus, feature_table = features_w_taxonomy, site = "F1_100", n_replicates = 6)
+
+```
+
+
+```{r 2%-fishmeal-filler1}
+# lapply over the four loci for filler1 and 2% fishmeal replicates
+lapply(four_locs, sodm.by.locus, feature_table = features_w_taxonomy, site = "F1_2", n_replicates = 6)
+
+```
+
+
+```{r 25%-fishmeal-filler1}
+# lapply over the four loci for filler1 and 25% fishmeal replicates
+lapply(four_locs, sodm.by.locus, feature_table = features_w_taxonomy, site = "F1_25", n_replicates = 6)
+
+```
+
+
+```{r 10%-fishmeal-filler1}
+# Workaround for the F1_10% feeds to avoid including the 100% fishmeal replicates as well.
+feed10per_feature_df <- features_w_taxonomy %>%
+  filter(str_detect(sample, "F1_10")) %>%
+  filter(!str_detect(sample, "F1_100")) 
+
+# lapply over the four loci for filler 1 and 10% fishmeal reps
+lapply(four_locs, sodm.by.locus, feature_table = feed10per_feature_df, site = "F1_10", n_replicates = 6)
+
+```
+
+
+```{r 25%-fishmeal-filler2}
+# lapply over the four loci for filler 2 and 25% fishmeal reps
+lapply(four_locs, sodm.by.locus, feature_table = features_w_taxonomy, site = "F2_25", n_replicates = 6)
+
+```
+
+Overall, the cleanest signal is undoubtedly from the vouchered reference pool.
+I'm going to need to filter according to the locus-ASV and sample, so I can't just combine the whole set of .csv files at this stage.
+
+I'll organize and filter the output files in the next R notebook.
+

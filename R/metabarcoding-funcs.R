@@ -196,9 +196,11 @@ sodm.by.locus <- function(feature_table, site, n_replicates, loc){
     filter(!term %in% c("psi", "p11", "p10")) %>%
     bind_cols(., asvs) 
   
-  # write that to a CSV for now
+  # write that to a CSV for now 
+  ## NOTE: this output directory was edited for the downsampling!!
   asv.sodm.output %>%
-    write_csv(paste0("csv_outputs/sodm/",loc,"_",site,"_ASV_SODM_100kiter.csv"))
+    #write_csv(paste0("csv_outputs/sodm/",loc,"_",site,"_ASV_SODM_100kiter.csv"))
+    write_csv(paste0("/Users/dianabaetscher/Documents/git-repos/metabarcoding-primer-portfolio/downsampled_loci/csv_outputs/sodm/",loc,"_",site,"_ASV_SODM_100kiter.csv"))
   
 }
 
@@ -517,6 +519,68 @@ bray_nmds_complete <- function(sodm_filtered_df, loc, sample){
 }
 
 
+
+## simple bray-curtis (downsampling, VRP)
+simple.bray <- function(sodm_filtered_df, loc, sample){
+  
+  loc.sample.df <- sodm_filtered_df %>%
+    filter(str_detect(sample, sample)) %>%
+    filter(locus == loc) %>% # select the locus for this iteration
+    select(seq, sample, count) %>%
+    unique() %>% # ensure there are no duplicates because they will cause the pivot to fail later
+    group_by(seq, sample) %>%
+    summarise(count = sum(count))
+  
+  ### community-by-species matrix
+  # To run the Bray-Curtis and NMDS, we will use the function metaMDS. The function requires a community-by-species matrix.
+  
+  # reformat the dataframe - wider
+  locus.comm.wide.df <- loc.sample.df %>%
+    pivot_wider(names_from = seq, values_from = count)
+  
+  # replace all NAs with 0
+  locus.comm.wide.df[is.na(locus.comm.wide.df)] <- 0
+  locus.comm.matrix <- column_to_rownames(locus.comm.wide.df)
+  
+  # split apart the sample name in the data frame to get the strata
+  community.df.sep <- locus.comm.wide.df %>%
+    separate(sample, into = c("reference", "pool", "pcr_rep"), remove = FALSE)
+  
+  # Calculating relative abundance and creating new dataframe with relative abundance data
+  relative.abund <- decostand(locus.comm.matrix, method = "total") # standardization method = total, which probably makes the most sense because it sums over the rows (and not the columns - which would be among replicates... which is what we're curious to calculate the dissimilarity among)
+  
+  loc.matrix.prop <- as.matrix(relative.abund)
+  
+  # jaccard similarity (presence/absence)
+  jaccard.dist <- vegdist(relative.abund, method = "jaccard")
+  
+  # generate an easily-filtered dataframe with any comparisons that are > 0.49 dissimilar
+  # Creating easy to view matrix
+  jaccard_distmat2 <- as.matrix(jaccard.dist, labels = T)
+  
+  # as.data.frame.table(jaccard_distmat2) %>%
+  # rename(rep1 = Var1, rep2 = Var2, Jaccard_dist = Freq) %>%
+  # filter(Jaccard_dist > 0.49) %>% 
+  # write_csv(paste0("csv_outputs/jaccard_dissimilar/",loc,"_",sample,"_jaccard_outliers.csv"))
+  
+  # Permanova for jaccard 
+  set.seed(129)
+  jaccard.pool.perm <- adonis2(jaccard.dist~pool, data = community.df.sep, permutations = 999, method = "jaccard")
+  
+  # Bray-Curtis dissimilarity
+  # Calculate distance matrix
+  bray.distmat <- vegdist(relative.abund, method = "bray")
+  
+  # generate an easily-filtered dataframe with any comparisons that are > 0.49 dissimilar
+  # Creating easy to view matrix
+  bray_distmat2 <- as.matrix(bray.distmat, labels = T)
+  
+  bray_df <- as.data.frame.table(bray_distmat2) %>%
+    rename(rep1 = Var1, rep2 = Var2, BrayCurtis_dist = Freq) %>%
+    filter(BrayCurtis_dist > 0.49)
+  
+  bray_df %>% write_csv(paste0("csv_outputs/bray_dissimilar/",loc,"_",sample,"_bray_outliers.csv"))
+}
 
 
 ## New function for mock feed ASVs

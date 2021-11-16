@@ -17,7 +17,8 @@ library(readxl)
 feature_df_no_eDNA <- readRDS("../data/feature_df_no_eDNA.rds")
 
 # taxonomy table df
-#taxonomy_df <- readRDS("../data/fixed_db_taxonomy_df_loci_collapsed.rds")
+taxonomy_df  <- readRDS("../data/taxonomy_ASV_BLAST_hits_fixed_accession_df.rds")
+
 
 # metadata
 meta <- read_csv("../data/jan_sample_list.csv")
@@ -33,6 +34,23 @@ four_loc <- c("mifish", "nsCOIFo", "fishminiA", "cep")
 # read in the species and proportions
 mock_spp <- read_csv("../data/mock_spp_pool.csv")
 
+```
+
+
+```{r reads-from-feature-df}
+feature_df_no_eDNA %>%
+  #filter(str_detect(sample, "RP")) %>% # how many reads per locus in just the reference pools?
+  group_by(locus) %>%
+  summarise(total_reads = sum(count)) %>%
+  ggplot(aes(x = locus, y = total_reads)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme(
+  axis.text.x = element_text(angle = 90),
+  axis.title.x = element_text(margin = margin(t = 10)),
+  axis.title.y = element_text(margin = margin(r = 10))
+    
+  )
+  
 ```
 
 
@@ -336,6 +354,78 @@ neg_blanks +
 )
 
 ```
+
+
+## read summary for reference pools
+
+```{r read-calcs-ref-pools}
+# beginning with a df with just the reference pools and controls
+# one entry per sequence
+# including only the porfolio of four primer sets
+pools_reads_plot <- feature_df_no_eDNA %>% 
+  filter(str_detect(sample, "RP") | str_detect(sample, "EX") | str_detect(sample, "NEG")) %>% # just the reference pools
+  left_join(., unique_taxonomy_spp_98) %>% # add the taxonomy to relevant entries
+  mutate(ord = ifelse(str_detect(sample, "EX"), 1, 3)) %>%
+    mutate(ord = ifelse(str_detect(sample, "NEG"), 2, ord)) %>%
+  mutate(reads = ifelse(is.na(taxon), NA, "metazoa")) %>%
+  group_by(sample, reads, ord) %>%
+  summarise(total_reads = sum(count)) 
+# plot that 
+pools_reads_plot %>%
+  ggplot(aes(x = reorder(sample, ord), y = total_reads, fill = reads)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_minimal() +
+  xlab("Sample_extraction replicate_PCR replicate") +
+  ylab("Sequencing reads") +
+  #scale_fill_manual(values = c("darkblue", "mediumblue", "lightblue", "goldenrod", "orange", "gray30", "gray50")) +
+  theme(
+  axis.text.x = element_text(angle = 90),
+  axis.title.x = element_text(margin = margin(t = 10)),
+  axis.title.y = element_text(margin = margin(r = 10))
+)
+  
+ggsave("pdf_outputs/SI_figure_reference_pools_reads_by_metazoa.pdf", width = 8, height = 5)
+```
+
+Also could use a boxplot to show the mean...
+```{r}
+feature_df_no_eDNA %>% 
+  filter(str_detect(sample, "RP")) %>% # just the reference pools
+  group_by(locus) %>%
+  mutate(cum_reads = sum(count)) %>%
+  #left_join(., unique_taxonomy_spp_98) %>% # add the taxonomy to relevant entries
+  mutate(`DNA pool` = ifelse(str_detect(sample, "FRP"), "FRP", "VRP")) %>%
+  group_by(sample, locus, `DNA pool`, cum_reads) %>%
+  summarise(total_reads = sum(count)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = reorder(locus, -cum_reads), y = total_reads, color = `DNA pool`)) +
+  theme_minimal() +
+  theme(
+  axis.text.x = element_text(angle = 90, hjust = 0.95),
+  axis.title.x = element_text(margin = margin(t = 10)),
+  axis.title.y = element_text(margin = margin(r = 10))
+) +
+  xlab("locus") +
+  ylab("sequencing reads")
+  
+ggsave("pdf_outputs/SI_figure_reads_per_locus_boxplot.pdf", width = 8, height = 5)
+```
+
+And to confirm, the summary distribution for reads/locus:
+```{r}
+# mean number of reads per locus for the reference pools?
+feature_df_no_eDNA %>% 
+  filter(str_detect(sample, "RP")) %>% # just the reference pools
+  group_by(locus, sample) %>%
+  mutate(cum_reads = sum(count)) %>%
+  select(locus, cum_reads) %>%
+  unique() %>%
+  arrange(desc(cum_reads)) %>%
+  ungroup() %>%
+  summarise(mean(cum_reads))
+
+```
+
 
 
 ## ASVs found only in the extraction blanks and negatives (and not in the samples?)

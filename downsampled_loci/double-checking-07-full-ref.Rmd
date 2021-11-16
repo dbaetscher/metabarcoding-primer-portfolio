@@ -1,0 +1,390 @@
+---
+title: "double-checking the full-reference DNA pool data"
+output: html_notebook
+---
+
+30 July 2021 - 
+verifying 07-full-reference
+
+
+## Load data
+
+```{r load-libraries-and-data}
+library(tidyverse)
+library(stringi)
+library(readxl)
+library(vegan)
+library(readr)
+library(stringi)
+library(textshape)
+library(reshape2)
+
+
+# un-collapsed and collapsed versions of the taxonomy with a 98% identity threshold for species-level ID
+tax_df_clean_slim <- readRDS("../extdata/downsampled_loci/data/uncollapsed_taxonomy_spp_98.rds")
+clean_taxonomy_df_unique <- readRDS("../extdata/downsampled_loci/data/unique_taxonomy_spp_98.rds")
+
+# load decontaminated feature table
+ref_sodm_bray_filtered_unique <- readRDS("../extdata/downsampled_loci/data/feature_table_sodm_bray_filtered.rds")
+
+```
+
+Read in the reference species for the full pool
+```{r reference-spp-list}
+# list of species in the reference mock community 
+reference_spp <- readxl::read_xlsx("../data/full_reference_spp_database_info.xlsx") %>%
+  select(2:4, 6:11)
+
+reference_spp %>%
+  select(species) %>%
+  distinct()
+```
+
+## Combine taxonomy and sample data frames
+```{r combine-dfs}
+# using the uncollapsed taxonomny data frame
+features_taxa_df <- ref_sodm_bray_filtered_unique %>%
+  left_join(., tax_df_clean_slim) %>%
+  filter(!is.na(species)) # remove the sequence counts for things that are not matching taxonomy (at this point)
+
+```
+
+## Full reference DNA pool
+
+To assess locus performance, select just the samples from the full-reference pool (FRP)
+```{r full-ref-pool}
+ref_pool_df <- features_taxa_df %>%
+  filter(stri_detect(sample, regex = "FRP")) # select just the full ref pool samples
+```
+
+Here I'm operating with the non-collapsed dataframe, which includes multiple top species hits for each sequence. Therefore, when I left-join those data to the reference species dataframe at the species-level, this allows for any of those top-taxonomic hits per sequence to match-up with the reference species.
+
+The 'taxonomic_level' and 'taxon' fields keep track of the resolution provided by the BLAST taxonomy filtering.
+
+I'll add a variable that designates the reference species as positive controls so then I can filter based on that.
+```{r}
+FRP <- reference_spp %>%
+  mutate(control = "positive")
+
+# these four taxa don't have species-level identities, so I'm not going to include them as part of the denominator for the % of species detected.
+FRP %>%
+  filter(str_detect(species, "_sp."))
+```
+
+### Conditional join
+
+Can I join the dataframe in a way that retains the species/genus/family information for whichever taxonomic level is appropriate?
+```{r}
+family_joined_df <- FRP %>%
+  select(species, genus, family, control) %>%
+  full_join(., ref_pool_df, by = "family") %>%
+  unique() %>%
+  filter(taxonomic_level %in% c("species", "genus", "family")) # exclude others
+
+# using the full-join, now I need to propagate the information for the species and genera that are in common 
+conditional_merged_df <- family_joined_df %>%
+  mutate(species = ifelse(species.x == species.y, species.x, NA)) %>% # if the species hit doesn't match the reference species, then count it as NA
+  mutate(genus = ifelse(genus.x == genus.y, genus.x, NA)) %>% # reorganize the dataframe
+  rename(ref_species = species.x, ref_genus = genus.x) %>%
+  select(ref_species, species, ref_genus, genus, family, control, locus, seq, sample, count, species.y, genus.y, taxon_percID, taxonomic_level, taxon)
+  
+# take a look
+cond_merged_collapsed <- conditional_merged_df %>% 
+  select(-seq, -sample, -count, -taxon_percID) %>%
+  unique()
+
+```
+
+Use the conditionally-joined dataframe to count the number of reference species/genera/families identified by all loci.
+```{r species-level-matches}
+all.spp.level <- cond_merged_collapsed %>%
+  filter(control == "positive") %>% # just the reference species (remove false positives)
+  filter(taxonomic_level == "species") %>% # include hits to just species 
+  filter(taxon == ref_species) %>% # and the correct reference species
+  ungroup() %>%
+  select(species) %>%
+  filter(!is.na(species)) %>%
+  distinct() 
+
+all.spp.level
+```
+
+What about with just the four markers?
+```{r spp-four-markers}
+# take the dataframe that is merged based on family matching between the reference taxa and the metabarcoding data...
+test_four <- cond_merged_collapsed %>% 
+  filter(ref_species == taxon) %>% # include just the instances where the ref species matches the taxon
+  ungroup() %>%
+  filter(locus %in% c("mifish", "fishminiA", "nsCOIFo", "cep")) %>%
+  select(ref_species) %>%
+  unique() 
+
+```
+
+```{r}
+# which of the reference species are not identified by the top four?
+cond_merged_collapsed %>%
+  filter(taxon == ref_species) %>%
+  anti_join(., test_four)
+
+```
+There are three reference species NOT identified by the top four loci (which matches up with the 58/61 proportion). One of the three species is identified by three loci (non-unique), which is how we can get the results that I'm seeing.
+
+So, for locus order, there's the top four, then aquaF2, and then fishcoilbc for the final species-level hit.
+
+```{r}
+# species level
+spp.tmp <- cond_merged_collapsed %>%
+  filter(ref_species == taxon) %>%
+  select(ref_species, locus) %>%
+  unique() 
+
+uniq_spp <- spp.tmp %>%
+  group_by(ref_species) %>%
+  tally() %>%
+  filter(n == 1) %>%
+  left_join(spp.tmp) %>%
+  ungroup() %>%
+  select(ref_species, locus) %>%
+  group_by(locus) %>%
+  tally(name = "unique") %>%
+  select(locus, unique) %>%
+  ungroup() %>%
+  mutate(rank = "species")
+
+```
+
+
+### Double check the genus and family level results, to make sure
+
+```{r}
+# genus level
+genus.tmp <- cond_merged_collapsed %>%
+  filter(ref_genus == taxon) %>%
+  select(ref_genus, locus) %>%
+  unique() 
+
+uniq_genus <- genus.tmp %>%
+  group_by(ref_genus) %>%
+  tally() %>%
+  filter(n == 1) %>%
+  left_join(genus.tmp) %>%
+  ungroup() %>%
+  select(ref_genus, locus) %>%
+  group_by(locus) %>%
+  tally(name = "unique") %>%
+  select(locus, unique) %>%
+  ungroup() %>%
+  mutate(rank = "genus") 
+
+```
+
+How many reference genera do the top four loci obtain?
+
+```{r}
+genus.tmp %>%
+  #filter(locus %in% c("mifish", "nsCOIFo", "fishminiA", "cep")) %>%
+  ungroup() %>%
+  group_by(locus) %>%
+  tally() %>%
+  arrange(desc(n))
+  
+```
+So for the genus-level ids, cep is on top with 33 hits. Fishmini A has 31, nsCOIFo has 30, and mifish has 27. There are other loci that have more hits (shark474, aquaF2, plankCOI, sharkCOImini), but fewer species-level hits.
+
+#### Family-level
+
+```{r}
+# family level
+family.tmp <- cond_merged_collapsed %>%
+  filter(control == "positive") %>%
+  #filter(family == taxon) %>% # don't use this approach - include species/genus level matches
+  filter(taxonomic_level %in% c("species", "genus", "family")) %>%
+  select(ref_species, family, locus) %>% ## The goal here is to remove those ref_families that are already counted for the higher rank unique loci
+  unique() 
+
+uniq_family <- family.tmp %>%
+  group_by(family) %>%
+  tally() %>%
+  filter(n == 1) %>%
+  left_join(family.tmp) %>%
+  ungroup() %>%
+  select(family, locus) %>%
+  group_by(locus) %>%
+  tally(name = "unique") %>%
+  select(locus, unique) %>%
+  ungroup() %>%
+  mutate(rank = "family")
+
+```
+The only loci with unique families are cep, mifish, and short28S. But here's where I'm not sure if I believe it.
+
+Check short28S again:
+```{r}
+family.tmp %>%
+  filter(locus == "short28S")
+```
+
+Apparently the family Euphausiidae is only identified (to family-level) by short28S.
+
+```{r}
+family.tmp %>%
+  filter(family == "Sergestidae")
+```
+This actually gives me more confidence in my results. Even if it was a bit of a worm hole.
+
+How many families do the top four loci identify?
+```{r}
+# need to include any reference taxa identified up to the level of family (including species/genus)
+cond_merged_collapsed %>%
+  filter(control == "positive") %>% # only reference taxa
+  filter(taxonomic_level %in% c("species", "genus", "family")) %>%
+  filter(locus %in% c("mifish", "nsCOIFo", "fishminiA", "cep")) %>%
+  select(family) %>%
+  unique()
+
+```
+
+
+Combine the three taxonomic levels of uniques
+```{r combine-uniques}
+uniques <- bind_rows(uniq_spp, uniq_genus, uniq_family)
+
+uniques
+```
+
+## Data for Figure 2
+
+Calculate the mean values per locus per replicate; alternatively, I could have three lines - one for the minimum, one for the maximum, and one for the mean.
+
+```{r mean-max-min-loc-accum}
+spp.per.sample.loc <- conditional_merged_df %>%
+  filter(taxonomic_level == "species") %>%
+  filter(ref_species == species) %>%
+  ungroup() %>%
+  select(species, locus, count, sample) %>% # here, I keep the individual sample replicates intact
+  unique() %>%
+  group_by(species, locus, sample) %>%
+  summarise(total_count = sum(count)) %>%
+  ungroup() %>%
+  group_by(locus, sample) %>%
+  add_tally(name = "num_species") %>%
+  arrange(desc(num_species))
+
+```
+
+Maximum species identified per locus
+```{r max-per-loc}
+loc.spp.summary <- spp.per.sample.loc %>%
+  group_by(locus) %>%
+  mutate(max = max(num_species)) %>%
+  mutate(min = min(num_species)) %>%
+  mutate(mean = mean(num_species)) %>%
+  mutate(sd = sd(num_species)) %>%
+  select(locus, min, max, mean, sd, species)
+```
+
+Maximum genera per locus
+```{r genus-cts-by-loc}
+gen.spp.per.sample.loc <- conditional_merged_df %>%
+  filter(taxonomic_level %in% c("species", "genus")) %>%
+  filter(ref_genus == genus.y) %>% # this ensures that the genus is accurate to the reference genus, even if the species is not.
+  ungroup() %>%
+  select(ref_species, locus, count, sample) %>%
+  unique() %>%
+  group_by(ref_species, locus, sample) %>%
+  summarise(total_count = sum(count)) %>%
+  ungroup() %>%
+  group_by(locus, sample) %>%
+  add_tally(name = "num_taxa") %>%
+  ungroup() %>%
+  group_by(locus) %>%
+  mutate(max = max(num_taxa)) %>%
+  mutate(min = min(num_taxa)) %>%
+  mutate(mean = mean(num_taxa)) %>%
+  mutate(sd = sd(num_taxa)) %>%
+  select(locus, min, max, mean, sd) %>%
+  unique() %>%
+  mutate(rank = "genus")
+
+```
+
+Species- through family-level per locus
+```{r all-three-tax-levels}
+fam.gen.spp.per.sample.loc <- conditional_merged_df %>%
+  filter(taxonomic_level %in% c("species", "genus", "family")) %>% # because the conditionally merged df was joined on family, the family level should be the same as the reference data
+  ungroup() %>%
+  select(ref_species, locus, count, sample) %>%
+  unique() %>%
+  group_by(ref_species, locus, sample) %>%
+  summarise(total_count = sum(count)) %>%
+  ungroup() %>%
+  group_by(locus, sample) %>%
+  add_tally(name = "num_taxa") %>%
+  ungroup() %>%
+  group_by(locus) %>%
+  mutate(max = max(num_taxa)) %>%
+  mutate(min = min(num_taxa)) %>%
+  mutate(mean = mean(num_taxa)) %>%
+  mutate(sd = sd(num_taxa)) %>%
+  select(locus, min, max, mean, sd) %>%
+  unique() %>%
+  mutate(rank = "family")
+
+```
+
+```{r combine-all-three-levels}
+# combine the species- genus- and family-level taxonomic matches to reference species by locus
+overall.loc.summary <- loc.spp.summary %>%
+  select(locus, min, max, mean, sd) %>%
+  unique() %>%
+  mutate(rank = "species") %>%
+  bind_rows(., gen.spp.per.sample.loc) %>%
+  bind_rows(., fam.gen.spp.per.sample.loc) %>%
+  left_join(., uniques)
+
+```
+
+## Rank accumulation curves
+
+We can visually capture the combinatorial power of the loci using rank accumulation curves where the locus that resolves the most species in our mock community is first and each additional locus is ordered and added to contribute to the overall number of known taxa.
+
+
+Create one curve, ordered by the number of species that a given locus resolves.
+This can be done in the package "vegan" by ordering the loci and then setting method = "collector."
+
+Rather than defaulting to ordering the loci by total number of species recovered, I manually adjusted the "collector" locus order because the rank according to # of species doesn't take complementarity into account.
+
+```{r}
+loc.spp.ordered <- conditional_merged_df %>%
+  #filter(taxonomic_level == "species") %>% # just at the species-level
+  ungroup() %>%
+  filter(ref_species == taxon) %>% # only those entries with accurate ID to the reference species
+  group_by(species, locus) %>%
+  summarise(total_count = sum(count)) %>%
+  ungroup() %>%
+  group_by(locus) %>%
+  add_tally(name = "num_species") %>%
+  arrange(desc(num_species)) %>%
+  ungroup() %>%
+  filter(!is.na(locus))
+  
+loc.spp.ordered$locus <- factor(loc.spp.ordered$locus, levels = c("fishminiA", "mifish", "nsCOIFo", "aquaF2", "cep", "fishcoilbc", "aquaF3", "plankCOI",  "16Svar","sharkCOImini", "short28S", "16SH1",  "shark474", "minibar",  "crust16S", "18Sn4", "18SSSU3", "ceph16S", "L2513H2714", "teleo", "16Sfish", "crust2"))
+
+# use sum as the aggregation function to keep the read count values
+wide_ordered.loc.samples <- dcast(loc.spp.ordered, locus ~ species, value.var = "num_species", fun.aggregate = sum)
+
+# change the sample column into rownames
+wide_ordered.loc.samples_tbl <- column_to_rownames(wide_ordered.loc.samples, loc = 1)
+sp1 <- specaccum(wide_ordered.loc.samples_tbl, method = "collector", permutations = 1000)
+
+# test out a species version first
+# convert to a df and calculate the proportion
+species_loc_prop_df <- as.data.frame(sp1$richness) %>%
+  rownames_to_column(var = "locus") %>%
+  mutate(proportion = sp1$richness/max(sp1$richness)) %>% 
+  mutate(taxon_level = "species") #%>% # remove the three loci that didn't have enough data
+  #filter(!locus %in% c("teleo", "16Sfish", "crust2"))
+
+species_loc_prop_df
+```
